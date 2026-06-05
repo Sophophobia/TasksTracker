@@ -427,8 +427,12 @@ function Toggle-Expand($key) {
     foreach ($k in $row.Controls) { if ($k.Name -eq 'ltask') { $tl = $k; break } }
     if (-not $tl) { return }
 
+    # Wrap width = the row's real available width (not $tl.Width, which the L+R
+    # anchor may have stretched past the visible area).
+    $taskW = $row.ClientSize.Width - $tl.Left - 8
+    if ($taskW -lt 60) { $taskW = 60 }
     $content.SuspendLayout()
-    $row.Height = Set-TaskLabelState $tl $expand $tl.Width
+    $row.Height = Set-TaskLabelState $tl $expand $taskW
     $content.ResumeLayout()
 }
 
@@ -487,6 +491,9 @@ function Render-List($recs) {
 
             $row = New-Object System.Windows.Forms.Panel
             $row.Dock = 'Top'; $row.BackColor = $cBg
+            $row.Width = $cw   # set full width BEFORE sizing children so the task
+                               # label's right-anchor margin is computed correctly
+                               # (otherwise the default ~200px row width stretches it)
 
             [void](New-RowLabel $row ('#'+$r.id) 10 30 $cDim $fIdEn 'MiddleLeft')
             [void](New-RowLabel $row $G.dot      42 14 (StatusColor $r.status) $fDot 'MiddleCenter')
