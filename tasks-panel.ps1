@@ -653,6 +653,59 @@ function Show-Empty($msg) {
     $content.Controls.Add($l)
 }
 
+# A small dark dialog that matches the panel (instead of the native gray
+# MessageBox). Buttons use DialogResult so the modal closes itself -- no
+# event-handler closures needed. Returns $true if the primary button was chosen.
+function New-DlgButton($text, $result, $accent) {
+    $b = New-Object System.Windows.Forms.Button
+    $b.Text = $text; $b.Font = $fTaskEn; $b.FlatStyle = 'Flat'
+    $b.Size = New-Object System.Drawing.Size(84, 30)
+    $b.DialogResult = $result
+    if ($accent) {
+        $b.BackColor = [System.Drawing.Color]::FromArgb(59,130,246); $b.ForeColor = [System.Drawing.Color]::White
+        $b.FlatAppearance.BorderSize = 0
+    } else {
+        $b.BackColor = $cBar; $b.ForeColor = $cText
+        $b.FlatAppearance.BorderColor = $cBorder; $b.FlatAppearance.BorderSize = 1
+    }
+    return $b
+}
+function Show-Message($text, $titleText, [switch]$yesNo) {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.FormBorderStyle = 'None'; $dlg.StartPosition = 'CenterScreen'
+    $dlg.TopMost = $true; $dlg.ShowInTaskbar = $false; $dlg.BackColor = $cBg
+    $dlg.ClientSize = New-Object System.Drawing.Size(330, 152)
+    $dlg.Add_Paint({ param($s,$e)
+        $pen = New-Object System.Drawing.Pen ($cBorder), 1
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1); $pen.Dispose() })
+
+    $bar2 = New-Object System.Windows.Forms.Panel
+    $bar2.Dock = 'Top'; $bar2.Height = 30; $bar2.BackColor = $cBar
+    $ht = New-Object System.Windows.Forms.Label
+    $ht.Text = $G.ring + '  ' + $titleText; $ht.ForeColor = $cText; $ht.Font = $fBar
+    $ht.Dock = 'Fill'; $ht.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $ht.TextAlign = 'MiddleLeft'
+    $bar2.Controls.Add($ht); $dlg.Controls.Add($bar2)
+
+    $msg = New-Object System.Windows.Forms.Label
+    $msg.Text = $text; $msg.ForeColor = $cText; $msg.Font = $fTaskEn
+    $msg.AutoSize = $false; $msg.Location = New-Object System.Drawing.Point(16, 44)
+    $msg.Size = New-Object System.Drawing.Size(298, 56); $dlg.Controls.Add($msg)
+
+    if ($yesNo) {
+        $b1 = New-DlgButton 'Open page' ([System.Windows.Forms.DialogResult]::Yes) $true
+        $b1.Location = New-Object System.Drawing.Point(230, 110)
+        $b2 = New-DlgButton 'Later'     ([System.Windows.Forms.DialogResult]::No)  $false
+        $b2.Location = New-Object System.Drawing.Point(140, 110)
+        $dlg.Controls.Add($b1); $dlg.Controls.Add($b2); $dlg.AcceptButton = $b1; $dlg.CancelButton = $b2
+    } else {
+        $b1 = New-DlgButton 'OK' ([System.Windows.Forms.DialogResult]::OK) $true
+        $b1.Location = New-Object System.Drawing.Point(230, 110)
+        $dlg.Controls.Add($b1); $dlg.AcceptButton = $b1
+    }
+    $r = $dlg.ShowDialog()
+    return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
 function Get-ProjectName($path) {
     return [System.IO.Path]::GetFileNameWithoutExtension($path)
 }
@@ -799,12 +852,12 @@ function Poll-UpdateCheck {
         Update-UpdateUI
         if ($manual) {
             if (-not $remote) {
-                [void][System.Windows.Forms.MessageBox]::Show('Could not check for updates (offline?).', 'Tasks Tracker')
+                Show-Message 'Could not check for updates (offline?).' 'Tasks Tracker' | Out-Null
             } elseif ($script:UpdateAvailable) {
                 $msg = ('An update is available (v{0}; you have v{1}).{2}Open the project page?' -f $remote, $script:LocalVersion, "`n")
-                if ([System.Windows.Forms.MessageBox]::Show($msg, 'Tasks Tracker', 'YesNo') -eq 'Yes') { Open-Repo }
+                if (Show-Message $msg 'Tasks Tracker' -yesNo) { Open-Repo }
             } else {
-                [void][System.Windows.Forms.MessageBox]::Show(('You are on the latest version (v{0}).' -f $script:LocalVersion), 'Tasks Tracker')
+                Show-Message ('You are on the latest version (v{0}).' -f $script:LocalVersion) 'Tasks Tracker' | Out-Null
             }
         }
     }
