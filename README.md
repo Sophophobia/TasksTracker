@@ -76,9 +76,20 @@ for a working sample. In short:
 ## Usage
 
 - **Drag** the top bar to move; **drag the bottom-right grip** to resize.
-- **↻** refresh now · **☰** menu · **✕** close.
+- **↻** refresh now · **▴** collapse to title bar · **☰** menu · **✕** close.
 - **Click a section header** to collapse/expand it.
 - **Click a row** to expand a long title; click again to collapse.
+- **Collapse to title bar:** click **▴** (or double-click the title bar) to roll
+  the window up so only the title bar shows; do it again to expand. The state is
+  remembered.
+
+## Updates
+
+When online, the panel checks GitHub for a newer version (it compares a small
+`VERSION` file). It checks **on launch**, **once a day**, and on demand via
+**☰ menu → Check for updates**. When an update is available a small **dot**
+appears in the title bar and a menu item links to the project page (click either
+to open it). Checks run in the background and silently no-op when offline.
 
 The window is a tool-window: always on top, hidden from the taskbar / Alt-Tab,
 and set to **not steal focus** — clicking it won't pull keyboard focus out of
@@ -108,6 +119,7 @@ Reads open with `FileShare.ReadWrite` and tolerate a file being rewritten
 | `Start Tasks Tracker.bat` | Double-click launcher. |
 | `PROMPT.md` | Format spec + copy-paste prompt for your AI (EN / 中文). |
 | `TASKS.example.md` | A working sample task file. |
+| `VERSION` | Version number used by the update check. |
 | `config.json` | Per-machine state (files, window pos/size, collapse) — auto-created, git-ignored. |
 
 ## Notes & limitations
@@ -194,9 +206,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 ## 用法
 
 - **拖**顶栏移动;**拖**右下角小三角缩放。
-- **↻** 立即刷新 · **☰** 菜单 · **✕** 关闭。
+- **↻** 立即刷新 · **▴** 折叠成标题栏 · **☰** 菜单 · **✕** 关闭。
 - **点击段标题**折叠/展开该段。
 - **点击某行**展开长标题,再点收起。
+- **折叠成标题栏**:点 **▴**(或双击标题栏)把窗口卷起来只剩标题栏,再点一次展开;
+  状态会被记住。
+
+## 更新
+
+联网时,面板会去 GitHub 检查是否有新版本(比对一个很小的 `VERSION` 文件)。检查时机:
+**启动时**、**每天一次**、以及 **☰ 菜单 → Check for updates** 手动检查。有更新时,
+标题栏会出现一个**小点**,菜单里也会出现指向项目页的条目(点小点或该条目即可打开)。
+检查在后台进行,离线时静默跳过。
 
 这是个工具窗口:始终置顶、不出现在任务栏/Alt-Tab、且**不抢焦点** —— 点它不会把你
 正在打字的输入焦点抢走。
@@ -225,6 +246,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 | `Start Tasks Tracker.bat` | 双击启动器。 |
 | `PROMPT.md` | 格式规范 + 给 AI 的现成 prompt(英文 / 中文)。 |
 | `TASKS.example.md` | 可运行的样例任务文件。 |
+| `VERSION` | 更新检查用的版本号。 |
 | `config.json` | 本机状态(文件列表、窗口位置/大小、折叠)—— 自动生成,已 git 忽略。 |
 
 ## 说明 / 局限

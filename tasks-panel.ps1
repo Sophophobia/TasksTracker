@@ -97,6 +97,7 @@ $G = @{
     close   = [char]0x2715                          # x
     triDown = [char]0x25BE                          # expanded
     triRt   = [char]0x25B8                          # collapsed
+    rollUp  = [char]0x25B4                          # roll up (collapse window to title)
 }
 
 # ------------------------------------------------------------- paths --------
@@ -107,6 +108,16 @@ $script:Files     = @()      # list of absolute file paths to read
 $script:PosX = $null; $script:PosY = $null
 $script:PosW = 440; $script:PosH = 470
 $script:Collapsed = @{ InProgress = $false; Pending = $false; Done = $true }
+$script:Rolled    = $false   # window collapsed to just the title bar
+$script:lastUpdateCheck = 0  # epoch seconds of last update check
+
+# ---- update check state ----
+$RepoUrl    = 'https://github.com/Sophophobia/TasksTracker'
+$VersionUrl = 'https://raw.githubusercontent.com/Sophophobia/TasksTracker/main/VERSION'
+$script:LocalVersion    = try { ([string](Get-Content (Join-Path $PSScriptRoot 'VERSION') -Raw)).Trim() } catch { '0' }
+$script:UpdateAvailable = $false
+$script:RemoteVersion   = $null
+$script:updPS = $null; $script:updHandle = $null; $script:updManual = $false
 
 function Load-Config {
     try {
@@ -118,6 +129,8 @@ function Load-Config {
             if ($null -ne $c.y)  { $script:PosY = [int]$c.y }
             if ($null -ne $c.w)  { $script:PosW = [int]$c.w }
             if ($null -ne $c.h)  { $script:PosH = [int]$c.h }
+            if ($null -ne $c.rolled) { $script:Rolled = [bool]$c.rolled }
+            if ($null -ne $c.lastUpdateCheck) { $script:lastUpdateCheck = [long]$c.lastUpdateCheck }
             if ($null -ne $c.collapsed) {
                 foreach ($k in 'InProgress','Pending','Done') {
                     if ($null -ne $c.collapsed.$k) { $script:Collapsed[$k] = [bool]$c.collapsed.$k }
@@ -132,6 +145,8 @@ function Save-Config {
         $obj = [ordered]@{
             files     = @($script:Files)
             x = $script:PosX; y = $script:PosY; w = $script:PosW; h = $script:PosH
+            rolled = $script:Rolled
+            lastUpdateCheck = $script:lastUpdateCheck
             collapsed = $script:Collapsed
         }
         ($obj | ConvertTo-Json -Compress) | Set-Content -Path $ConfigPath -Encoding UTF8
@@ -327,16 +342,26 @@ function New-BarButton($glyph, $w) {
     $b.Add_MouseLeave({ $this.ForeColor = $cBarDim })
     return $b
 }
+# Update-available dot (hidden until an update is found). Leftmost of the right
+# cluster so it reads as a small dot in the title bar.
+$dotUpd = New-Object System.Windows.Forms.Label
+$dotUpd.Text = $G.dot; $dotUpd.ForeColor = [System.Drawing.Color]::FromArgb(245,158,11)
+$dotUpd.Font = $fDot; $dotUpd.AutoSize = $false; $dotUpd.Dock = 'Right'; $dotUpd.Width = 16
+$dotUpd.TextAlign = 'MiddleCenter'; $dotUpd.Visible = $false; $dotUpd.Cursor = 'Hand'
+$bar.Controls.Add($dotUpd)
+
 $lblTime = New-Object System.Windows.Forms.Label
 $lblTime.ForeColor = $cBarDim; $lblTime.Font = $fTime
 $lblTime.AutoSize = $false; $lblTime.Dock = 'Right'; $lblTime.Width = 70; $lblTime.TextAlign = 'MiddleRight'
 $bar.Controls.Add($lblTime)
 
+$btnRoll    = New-BarButton $G.rollUp  26
 $btnClose   = New-BarButton $G.close   30
 $btnMenu    = New-BarButton $G.menu    28
 $btnRefresh = New-BarButton $G.refresh 28
-$bar.Controls.Add($btnRefresh); $bar.Controls.Add($btnMenu); $bar.Controls.Add($btnClose)
-$tip.SetToolTip($btnRefresh, 'Refresh now'); $tip.SetToolTip($btnMenu, 'Menu'); $tip.SetToolTip($btnClose, 'Close panel')
+$bar.Controls.Add($btnRoll); $bar.Controls.Add($btnRefresh); $bar.Controls.Add($btnMenu); $bar.Controls.Add($btnClose)
+$tip.SetToolTip($btnRoll, 'Collapse to title bar'); $tip.SetToolTip($btnRefresh, 'Refresh now'); $tip.SetToolTip($btnMenu, 'Menu'); $tip.SetToolTip($btnClose, 'Close panel')
+$tip.SetToolTip($dotUpd, 'Update available')
 $btnClose.Add_MouseEnter({ $this.ForeColor = [System.Drawing.Color]::FromArgb(248,113,113) })
 $title.SendToBack()
 
@@ -590,9 +615,89 @@ function Remove-FilePath($path) {
     Save-Config; Update-Now -force
 }
 
+# ------------------------------------------------- roll up / collapse -------
+function Set-Rolled($rolled) {
+    $script:Rolled = [bool]$rolled
+    if ($script:Rolled) {
+        $content.Visible = $false; $grip.Visible = $false
+        $form.Height = $TitleH + 1
+    } else {
+        $content.Visible = $true; $grip.Visible = $true
+        $form.Height = [Math]::Max($MinH, $script:PosH)
+    }
+    $btnRoll.Text = $(if ($script:Rolled) { $G.triDown } else { $G.rollUp })
+    $tip.SetToolTip($btnRoll, $(if ($script:Rolled) { 'Expand' } else { 'Collapse to title bar' }))
+    Save-Config
+}
+function Toggle-Roll { Set-Rolled (-not $script:Rolled) }
+
+# ------------------------------------------------------- update check -------
+function Open-Repo { try { Start-Process $RepoUrl } catch { } }
+
+function Is-Newer($remote, $local) {
+    $r = 0; $l = 0
+    if ([int]::TryParse([string]$remote, [ref]$r) -and [int]::TryParse([string]$local, [ref]$l)) { return ($r -gt $l) }
+    return ([bool]$remote -and ([string]$remote -ne [string]$local))
+}
+
+function Update-UpdateUI {
+    $dotUpd.Visible = $script:UpdateAvailable
+    if ($script:UpdateAvailable) { $tip.SetToolTip($dotUpd, ('Update available (v{0}; you have v{1}) - click to open' -f $script:RemoteVersion, $script:LocalVersion)) }
+}
+
+# Fetch the remote VERSION in a separate runspace so the UI never blocks; the
+# timer polls for completion. Offline / failure -> no flag, no error (unless manual).
+function Start-UpdateCheck { param([switch]$manual)
+    if ($script:updHandle) { if ($manual) { $script:updManual = $true }; return }
+    $script:updManual = [bool]$manual
+    try {
+        $ps = [PowerShell]::Create()
+        [void]$ps.AddScript({
+            param($url)
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+                $req = [System.Net.HttpWebRequest]::Create($url)
+                $req.Timeout = 6000; $req.ReadWriteTimeout = 6000; $req.UserAgent = 'TasksTracker'
+                $resp = $req.GetResponse(); $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+                $t = $sr.ReadToEnd(); $sr.Close(); $resp.Close()
+                return ([string]$t).Trim()
+            } catch { return $null }
+        }).AddArgument($VersionUrl)
+        $script:updPS = $ps
+        $script:updHandle = $ps.BeginInvoke()
+    } catch { $script:updPS = $null; $script:updHandle = $null; $script:updManual = $false }
+}
+
+function Poll-UpdateCheck {
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if (-not $script:updHandle -and (($now - $script:lastUpdateCheck) -gt 86400)) { Start-UpdateCheck }  # daily
+    if ($script:updHandle -and $script:updHandle.IsCompleted) {
+        $remote = $null
+        try { $remote = @($script:updPS.EndInvoke($script:updHandle)) | Where-Object { $_ } | Select-Object -Last 1 } catch { }
+        try { $script:updPS.Dispose() } catch { }
+        $script:updPS = $null; $script:updHandle = $null
+        $script:lastUpdateCheck = $now; Save-Config
+        $manual = $script:updManual; $script:updManual = $false
+        if ($remote) { $script:RemoteVersion = [string]$remote; $script:UpdateAvailable = (Is-Newer $remote $script:LocalVersion) }
+        Update-UpdateUI
+        if ($manual) {
+            if (-not $remote) {
+                [void][System.Windows.Forms.MessageBox]::Show('Could not check for updates (offline?).', 'Tasks Tracker')
+            } elseif ($script:UpdateAvailable) {
+                $msg = ('An update is available (v{0}; you have v{1}).{2}Open the project page?' -f $remote, $script:LocalVersion, "`n")
+                if ([System.Windows.Forms.MessageBox]::Show($msg, 'Tasks Tracker', 'YesNo') -eq 'Yes') { Open-Repo }
+            } else {
+                [void][System.Windows.Forms.MessageBox]::Show(('You are on the latest version (v{0}).' -f $script:LocalVersion), 'Tasks Tracker')
+            }
+        }
+    }
+}
+
 # ------------------------------------------------------------- buttons ------
 $btnRefresh.Add_Click({ Update-Now -force })
 $btnClose.Add_Click({ $form.Close() })
+$btnRoll.Add_Click({ Toggle-Roll })
+$dotUpd.Add_Click({ Open-Repo })
 
 $btnMenu.Add_Click({
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -631,6 +736,21 @@ $btnMenu.Add_Click({
     $miCollapse.Add_Click({ foreach ($k in 'InProgress','Pending','Done') { $script:Collapsed[$k] = $true }; Save-Config; Update-Now -force })
     [void]$menu.Items.Add($miCollapse)
 
+    $miRoll = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($script:Rolled) { 'Expand from title bar' } else { 'Collapse to title bar' })); $miRoll.ForeColor = $cText
+    $miRoll.Add_Click({ Toggle-Roll })
+    [void]$menu.Items.Add($miRoll)
+
+    [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    if ($script:UpdateAvailable) {
+        $miUpd = New-Object System.Windows.Forms.ToolStripMenuItem(('Update available (v{0}) - open page' -f $script:RemoteVersion))
+        $miUpd.ForeColor = [System.Drawing.Color]::FromArgb(245,158,11)
+        $miUpd.Add_Click({ Open-Repo })
+        [void]$menu.Items.Add($miUpd)
+    }
+    $miCheck = New-Object System.Windows.Forms.ToolStripMenuItem('Check for updates'); $miCheck.ForeColor = $cText
+    $miCheck.Add_Click({ Start-UpdateCheck -manual })
+    [void]$menu.Items.Add($miCheck)
+
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $miQuit = New-Object System.Windows.Forms.ToolStripMenuItem('Close panel'); $miQuit.ForeColor = $cText
     $miQuit.Add_Click({ $form.Close() })
@@ -646,6 +766,8 @@ $startDrag = { param($s,$e) if ($e.Button -eq [System.Windows.Forms.MouseButtons
 $doDrag = { param($s,$e) if ($script:dragging) { $p = [System.Windows.Forms.Cursor]::Position; $form.Location = New-Object System.Drawing.Point(($p.X - $script:dragOff.X), ($p.Y - $script:dragOff.Y)) } }
 $endDrag = { param($s,$e) if ($script:dragging) { $script:dragging = $false; $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y; Save-Config } }
 foreach ($ctl in @($bar, $title)) { $ctl.Add_MouseDown($startDrag); $ctl.Add_MouseMove($doDrag); $ctl.Add_MouseUp($endDrag) }
+# Double-click the title bar to roll up / down.
+$bar.Add_DoubleClick({ Toggle-Roll }); $title.Add_DoubleClick({ Toggle-Roll })
 
 # ------------------------------------------------------------- resizing -----
 $script:rsz = $false
@@ -671,17 +793,20 @@ $grip.Add_MouseUp({
 # ------------------------------------------------------------- timer --------
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000
-$timer.Add_Tick({ Update-Now })
+$timer.Add_Tick({ Update-Now; Poll-UpdateCheck })
 $timer.Start()
 
 $form.Add_Shown({
     try { [Dark]::DarkScroll($content.Handle) } catch { }
     if ($script:Files.Count -eq 0) { Add-Files }   # first-run file picker
     Update-Now -force
+    Set-Rolled $script:Rolled          # apply saved roll state + button glyph
+    Start-UpdateCheck                  # check on open
 })
 $form.Add_FormClosing({
     $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y
-    $script:PosW = $form.Width; $script:PosH = $form.Height
+    $script:PosW = $form.Width
+    if (-not $script:Rolled) { $script:PosH = $form.Height }   # keep the expanded height
     Save-Config; $timer.Stop()
 })
 
