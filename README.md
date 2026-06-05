@@ -1,9 +1,10 @@
 # Tasks Tracker
 
-> A tiny, always-on-top, **read-only** floating panel for Windows that shows your
-> task list parsed live from one or more Markdown files. Edit the file(s) in your
-> editor or have an AI update them — the panel refreshes within ~2 seconds. It
-> never writes to your files.
+> A tiny, always-on-top floating panel for Windows that shows your task list
+> parsed live from one or more Markdown files. Edit the file(s) in your editor or
+> have an AI update them — the panel refreshes within ~2 seconds. You can also
+> **right-click a task to change its status or edit its title**, which is written
+> back to the file. It otherwise leaves your files untouched.
 
 It pairs well with an AI workflow: keep a `TASKS.md` per project, tell your AI to
 maintain it (see [`PROMPT.md`](PROMPT.md)), and glance at this panel in a screen
@@ -81,6 +82,8 @@ for a working sample. In short:
 - **↻** refresh now · **▴** collapse to title bar · **☰** menu · **✕** close.
 - **Click a section header** to collapse/expand it.
 - **Click a row** to expand a long title; click again to collapse.
+- **Right-click a task** → *Edit task…* to rename it, or *Status ▸* to move it to
+  another status (or *New status…*). The change is written back to that file.
 - **Collapse to title bar:** click **▴** (or double-click the title bar) to roll
   the window up so only the title bar shows; do it again to expand. The state is
   remembered.
@@ -103,7 +106,7 @@ whatever you're typing in.
   one or more TASKS .md files  (you / your AI edit these)
             |  poll mtime every ~2s; re-parse only on change
             v
-   tasks-panel.ps1  (PowerShell + WinForms, read-only)
+   tasks-panel.ps1  (PowerShell + WinForms; read + on-demand write-back)
             |  group by status, tag by project/category
             v
    always-on-top dark panel in a screen corner
@@ -128,7 +131,10 @@ Reads open with `FileShare.ReadWrite` and tolerate a file being rewritten
 
 - Windows-only (WinForms). The dark scrollbar uses Windows dark-mode theming;
   on very old builds it falls back to the default scrollbar.
-- Read-only by design — it never edits your task files.
+- Writes only on an explicit edit (right-click → Edit/Status); otherwise it
+  never touches your files. Edits are applied in place + written back atomically
+  (temp file + copy-overwrite). If a file is auto-synced, a panel edit could be
+  overwritten by the sync — edit when sync is idle.
 - Statuses are whatever your `## Status legend` declares (any number, any names).
 - Per-project **filtering** and **drag-to-reorder** of sections are on the roadmap.
 
@@ -142,9 +148,9 @@ MIT — see [`LICENSE`](LICENSE).
 
 # 中文
 
-> 一个极简、**只读**、常驻置顶的 Windows 悬浮小窗,实时显示从一个或多个 Markdown
-> 文件解析出的任务清单。你在编辑器里改、或让 AI 改文件,面板都会在 ~2 秒内刷新。
-> 它**绝不写入**你的文件。
+> 一个极简、常驻置顶的 Windows 悬浮小窗,实时显示从一个或多个 Markdown 文件解析出的
+> 任务清单。你在编辑器里改、或让 AI 改文件,面板都会在 ~2 秒内刷新。也可以**右键某个
+> 任务改状态或改标题**,改动会写回文件;除此之外不动你的文件。
 
 适合配合 AI 工作流:每个项目放一个 `TASKS.md`,让 AI 按 [`PROMPT.md`](PROMPT.md)
 维护它,然后把这个面板挂在屏幕角落,一眼看到所有项目里进行中 / 待办 / 完成的任务。
@@ -211,6 +217,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 - **↻** 立即刷新 · **▴** 折叠成标题栏 · **☰** 菜单 · **✕** 关闭。
 - **点击段标题**折叠/展开该段。
 - **点击某行**展开长标题,再点收起。
+- **右键某个任务** → *Edit task…* 改名,或 *Status ▸* 移到别的状态(或 *New status…*);
+  改动会写回该文件。
 - **折叠成标题栏**:点 **▴**(或双击标题栏)把窗口卷起来只剩标题栏,再点一次展开;
   状态会被记住。
 
@@ -230,7 +238,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
   一个或多个 TASKS .md 文件 (你 / 你的 AI 编辑)
             |  每 ~2 秒查一次 mtime;有变化才重新解析
             v
-   tasks-panel.ps1  (PowerShell + WinForms, 只读)
+   tasks-panel.ps1  (PowerShell + WinForms;读取 + 按需写回)
             |  按状态分组,按项目/分类打标签
             v
    屏幕角落的常驻置顶深色面板
@@ -255,7 +263,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 
 - 仅 Windows(WinForms)。深色滚动条依赖 Windows 暗色主题,在很老的系统上会回退为
   默认滚动条。
-- 设计上**只读**,绝不修改你的任务文件。
+- 仅在你显式编辑时写入(右键 → Edit/Status),否则不碰你的文件。编辑就地应用并原子写回
+  (临时文件 + 覆盖)。若文件被 auto-sync 同步,面板的改动可能被同步覆盖 —— 同步空闲时再改。
 - 状态由你的 `## Status legend` 决定(任意数量、任意命名)。
 - 按项目**筛选**、分组**拖动排序**已在路线图上。
 

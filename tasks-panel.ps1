@@ -1,10 +1,11 @@
 <#
   tasks-panel.ps1  --  Tasks Tracker floating panel
 
-  A small, always-on-top, draggable + resizable, READ-ONLY panel that shows a
-  live task list parsed from one or more Markdown files. It never writes /
-  modifies the source files -- it only polls their mtime (~2s) and re-parses
-  when any of them changes.
+  A small, always-on-top, draggable + resizable panel that shows a live task
+  list parsed from one or more Markdown files. It polls their mtime (~2s) and
+  re-parses when any changes. It only writes on an explicit user action --
+  right-click a task to edit its title or change its status; the change is
+  applied to that task in place and written back (temp file + copy-overwrite).
 
   Tolerant of a file being rewritten underneath it (e.g. an auto-sync task):
   reads open with FileShare.ReadWrite and a failed/locked read just skips that
@@ -276,8 +277,9 @@ function Match-InlineStatus($title) {
 }
 
 # Parse one file's text into task records. $defaultProject is the fallback
-# project name (the file name); a `# Project: X` line overrides it.
-function Parse-File($raw, $defaultProject) {
+# project name (the file name); a `# Project: X` line overrides it. $path is the
+# source file (carried on each record so edits can be written back to it).
+function Parse-File($raw, $defaultProject, $path) {
     $recs = @()
     if ([string]::IsNullOrEmpty($raw)) { return $recs }
 
@@ -301,7 +303,7 @@ function Parse-File($raw, $defaultProject) {
             $inl = Match-InlineStatus $m[2]
             $stKey = $(if ($inl[0]) { $inl[0] } elseif ($section) { $section } else { '__other__' })
             $recs += [pscustomobject]@{
-                id = $id; status = $stKey; area = $area; project = $project; task = ([string]$inl[1]).Trim()
+                id = $id; status = $stKey; area = $area; project = $project; task = ([string]$inl[1]).Trim(); file = $path
             }
             continue
         }
@@ -319,6 +321,104 @@ function Parse-File($raw, $defaultProject) {
         }
     }
     return $recs
+}
+
+# ------------------------------------------------- write-back transforms ----
+# All operate on text -> text (pure), so they can be unit-tested and applied to
+# a fresh read just before an atomic write. Newlines are preserved (CRLF/LF).
+
+function Task-Id($line) {
+    if (($line -match $script:rxTaskSep) -or ($line -match $script:rxTaskTxt) -or ($line -match $script:rxTaskId)) {
+        return ($matches[1] + $matches[2])
+    }
+    return $null
+}
+
+# Replace a task's title text in place (keeps level, #id, separator, and any
+# leading inline status emoji).
+function Set-TaskTitleText($text, $id, $newTitle) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = @($text -split "`r?`n")
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        if ((Task-Id $lines[$i]) -eq $id) {
+            $ln = $lines[$i]
+            $m = [regex]::Match($ln, $script:rxTaskSep)
+            if (-not $m.Success) { $m = [regex]::Match($ln, $script:rxTaskTxt) }
+            if ($m.Success) {
+                $g = $m.Groups[3]
+                $prefix = $ln.Substring(0, $g.Index)
+                $inl = Match-InlineStatus $g.Value
+                $lead = ''
+                if ($inl[0]) { $st = Get-Status $inl[0]; if ($st -and $st.emoji) { $lead = $st.emoji + ' ' } }
+                $lines[$i] = $prefix + $lead + $newTitle
+            } else {
+                $lines[$i] = $ln.TrimEnd() + ' ' + $G.mid + ' ' + $newTitle
+            }
+            break
+        }
+    }
+    return ($lines -join $nl)
+}
+
+# Add a "- <name>" line to the file's "## Status legend" (no-op if absent or
+# already present).
+function Add-LegendStatusText($text, $name) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = @($text -split "`r?`n")
+    $inLegend = $false; $legendHead = -1; $lastBullet = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $ln = $lines[$i]
+        if ($ln -match '^##\s') {
+            if ($ln -match '(?i)status\s+legend') { $inLegend = $true; $legendHead = $i; continue }
+            elseif ($inLegend) { break }
+        }
+        if ($inLegend) {
+            if ($ln -match '^\s*-\s+(.+?)\s*$') {
+                $lastBullet = $i
+                if ((Parse-LegendLine $matches[1]).name.ToLower() -eq $name.ToLower()) { return $text }
+            } elseif ($ln -match '^#') { break }
+        }
+    }
+    if ($legendHead -lt 0) { return $text }
+    $at = $(if ($lastBullet -ge 0) { $lastBullet + 1 } else { $legendHead + 1 })
+    $arr = [System.Collections.ArrayList]@($lines)
+    [void]$arr.Insert($at, "- $name")
+    return ($arr -join $nl)
+}
+
+# Move a task's whole block (heading + following lines up to the next heading)
+# to the "## <statusName>" section within the SAME area (`# ...` group). Creates
+# the section at the end of the area if it doesn't exist there.
+function Move-TaskStatusText($text, $id, $statusName) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $arr = [System.Collections.ArrayList]@($text -split "`r?`n")
+    $s = -1
+    for ($i = 0; $i -lt $arr.Count; $i++) { if ((Task-Id $arr[$i]) -eq $id) { $s = $i; break } }
+    if ($s -lt 0) { return $text }
+    $e = $arr.Count
+    for ($i = $s + 1; $i -lt $arr.Count; $i++) { if ($arr[$i] -match '^#{1,6}\s') { $e = $i; break } }
+    $block = @($arr.GetRange($s, $e - $s))
+
+    $areaStart = -1
+    for ($j = $s - 1; $j -ge 0; $j--) { if (($arr[$j] -match '^#\s') -and ($arr[$j] -notmatch '^##')) { $areaStart = $j; break } }
+    $arr.RemoveRange($s, $e - $s)
+
+    $areaEnd = $arr.Count
+    for ($j = [Math]::Max($areaStart + 1, 0); $j -lt $arr.Count; $j++) { if (($arr[$j] -match '^#\s') -and ($arr[$j] -notmatch '^##')) { $areaEnd = $j; break } }
+    $from = $(if ($areaStart -ge 0) { $areaStart + 1 } else { 0 })
+    $key = $statusName.ToLower()
+
+    $t = -1
+    for ($j = $from; $j -lt $areaEnd; $j++) { if (($arr[$j] -match '^##\s') -and ((Match-StatusInText $arr[$j]) -eq $key)) { $t = $j; break } }
+    if ($t -ge 0) {
+        $tEnd = $areaEnd
+        for ($j = $t + 1; $j -lt $areaEnd; $j++) { if ($arr[$j] -match '^#{1,2}\s') { $tEnd = $j; break } }
+        $arr.InsertRange($tEnd, $block)
+    } else {
+        $ins = [System.Collections.ArrayList]@(); [void]$ins.Add(''); [void]$ins.Add("## $statusName"); $ins.AddRange($block)
+        $arr.InsertRange($areaEnd, $ins)
+    }
+    return ($arr -join $nl)
 }
 
 # ----------------------------------------------------- theme (dark) ---------
@@ -634,8 +734,8 @@ function Render-List($recs) {
 
             $row.Height = Set-TaskLabelState $tl $expanded $taskW
 
-            $row.Tag = $rowKey; $row.Cursor = 'Hand'; $row.Add_Click($script:onRowClick)
-            foreach ($k in @($row.Controls)) { $k.Tag = $rowKey; $k.Cursor = 'Hand'; $k.Add_Click($script:onRowClick) }
+            $row.Tag = $rowKey; $row.Cursor = 'Hand'; $row.Add_Click($script:onRowClick); $row.ContextMenuStrip = $script:rowMenu
+            foreach ($k in @($row.Controls)) { $k.Tag = $rowKey; $k.Cursor = 'Hand'; $k.Add_Click($script:onRowClick); $k.ContextMenuStrip = $script:rowMenu }
             [void]$blocks.Add($row)
         }
     }
@@ -706,6 +806,58 @@ function Show-Message($text, $titleText, [switch]$yesNo) {
     return ($r -eq [System.Windows.Forms.DialogResult]::Yes)
 }
 
+# Dark single-line input dialog. Returns the text, or $null if cancelled.
+function Show-Input($promptText, $titleText, $default) {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.FormBorderStyle = 'None'; $dlg.StartPosition = 'CenterScreen'
+    $dlg.TopMost = $true; $dlg.ShowInTaskbar = $false; $dlg.BackColor = $cBg
+    $dlg.ClientSize = New-Object System.Drawing.Size(380, 150)
+    $dlg.Add_Paint({ param($s,$e)
+        $pen = New-Object System.Drawing.Pen ($cBorder), 1
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1); $pen.Dispose() })
+
+    $bar2 = New-Object System.Windows.Forms.Panel; $bar2.Dock = 'Top'; $bar2.Height = 30; $bar2.BackColor = $cBar
+    $ht = New-Object System.Windows.Forms.Label; $ht.Text = $G.ring + '  ' + $titleText; $ht.ForeColor = $cText; $ht.Font = $fBar
+    $ht.Dock = 'Fill'; $ht.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $ht.TextAlign = 'MiddleLeft'
+    $bar2.Controls.Add($ht); $dlg.Controls.Add($bar2)
+
+    $pl = New-Object System.Windows.Forms.Label; $pl.Text = $promptText; $pl.ForeColor = $cDim; $pl.Font = $fTaskEn
+    $pl.AutoSize = $false; $pl.Location = New-Object System.Drawing.Point(16, 40); $pl.Size = New-Object System.Drawing.Size(348, 18); $dlg.Controls.Add($pl)
+
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.Text = [string]$default; $tb.BackColor = [System.Drawing.Color]::FromArgb(38,38,44); $tb.ForeColor = $cText
+    $tb.BorderStyle = 'FixedSingle'; $tb.Font = (FTask ([string]$default))
+    $tb.Location = New-Object System.Drawing.Point(16, 62); $tb.Size = New-Object System.Drawing.Size(348, 26)
+    $dlg.Controls.Add($tb)
+
+    $ok = New-DlgButton 'Save'   ([System.Windows.Forms.DialogResult]::OK)     $true
+    $ok.Location = New-Object System.Drawing.Point(280, 108)
+    $cn = New-DlgButton 'Cancel' ([System.Windows.Forms.DialogResult]::Cancel) $false
+    $cn.Location = New-Object System.Drawing.Point(190, 108)
+    $dlg.Controls.Add($ok); $dlg.Controls.Add($cn); $dlg.AcceptButton = $ok; $dlg.CancelButton = $cn
+    $dlg.Add_Shown({ $tb.Focus(); $tb.SelectAll() })
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { return $tb.Text }
+    return $null
+}
+
+# Atomic UTF-8 (no BOM) write: temp file + Replace, so a crash can't leave the
+# file half-written. Returns $false if the file is busy / write fails.
+function Write-FileAtomic($path, $text) {
+    $tmp = $null
+    try {
+        $full = [System.IO.Path]::GetFullPath($path)   # normalize (forward slashes -> backslashes)
+        $enc  = New-Object System.Text.UTF8Encoding($false)
+        $tmp  = $full + '.tttmp'
+        [System.IO.File]::WriteAllText($tmp, $text, $enc)   # fully write temp first
+        [System.IO.File]::Copy($tmp, $full, $true)          # then overwrite in one call
+        [System.IO.File]::Delete($tmp)
+        return $true
+    } catch {
+        try { if ($tmp -and (Test-Path $tmp)) { [System.IO.File]::Delete($tmp) } } catch { }
+        return $false
+    }
+}
+
 function Get-ProjectName($path) {
     return [System.IO.Path]::GetFileNameWithoutExtension($path)
 }
@@ -734,7 +886,7 @@ function Update-Now {
         if (-not (Test-Path $f)) { continue }
         $raw = Read-TasksFile $f
         if ($null -eq $raw) { return }
-        $entries += @{ project = (Get-ProjectName $f); raw = $raw }
+        $entries += @{ project = (Get-ProjectName $f); raw = $raw; path = $f }
     }
 
     Build-Statuses (@($entries | ForEach-Object { $_.raw }))
@@ -748,7 +900,7 @@ function Update-Now {
     }
 
     $all = @()
-    foreach ($e in $entries) { $all += Parse-File $e.raw $e.project }
+    foreach ($e in $entries) { $all += Parse-File $e.raw $e.project $e.path }
 
     # Append an "Other" status if any task didn't match a legend status.
     if ((@($all | Where-Object { $_.status -eq '__other__' }).Count -gt 0) -and -not (Get-Status '__other__')) {
@@ -927,6 +1079,68 @@ $btnMenu.Add_Click({
     [void]$menu.Items.Add($miQuit)
 
     $menu.Show($btnMenu, (New-Object System.Drawing.Point(0, $TitleH)))
+})
+
+# --------------------------------------------------- edit / write-back ------
+function Find-Rec($rowKey) { foreach ($r in $script:LastRecs) { if ((Row-Key $r) -eq $rowKey) { return $r } }; return $null }
+
+function Save-FileChange($path, $newText) {
+    if (Write-FileAtomic $path $newText) { $script:LastMtime = $null; $script:LastSig = '__edited__'; Update-Now -force }
+    else { Show-Message 'Could not save (file busy? try again).' 'Tasks Tracker' | Out-Null }
+}
+function Do-EditTask($rec) {
+    if (-not $rec) { return }
+    $new = Show-Input 'Edit task title:' 'Edit task' $rec.task
+    if ($null -eq $new) { return }
+    $new = $new.Trim(); if (-not $new) { return }
+    $raw = Read-TasksFile $rec.file
+    if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
+    Save-FileChange $rec.file (Set-TaskTitleText $raw $rec.id $new)
+}
+function Do-ChangeStatus($rec, $statusName, $isNew) {
+    if (-not $rec) { return }
+    $raw = Read-TasksFile $rec.file
+    if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
+    if ($isNew) { $raw = Add-LegendStatusText $raw $statusName }
+    Save-FileChange $rec.file (Move-TaskStatusText $raw $rec.id $statusName)
+}
+function Do-NewStatus($rec) {
+    if (-not $rec) { return }
+    $name = Show-Input 'New status name:' 'New status' ''
+    if ($null -eq $name) { return }
+    $name = $name.Trim(); if (-not $name) { return }
+    Do-ChangeStatus $rec $name $true
+}
+
+# Shared right-click menu for task rows; rebuilt each time it opens from the
+# row's record (the row/labels carry the row key on .Tag; SourceControl tells
+# us which one was clicked).
+$script:rowMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$script:rowMenu.BackColor = $cBar; $script:rowMenu.ForeColor = $cText; $script:rowMenu.ShowImageMargin = $false
+$script:rowMenu.Add_Opening({
+    $rk = $null; try { $rk = [string]$script:rowMenu.SourceControl.Tag } catch { }
+    $script:rowMenu.Items.Clear()
+    $rec = Find-Rec $rk
+    if (-not $rec) { $n = New-Object System.Windows.Forms.ToolStripMenuItem('(no task)'); $n.Enabled = $false; [void]$script:rowMenu.Items.Add($n); return }
+
+    $miEdit = New-Object System.Windows.Forms.ToolStripMenuItem('Edit task...'); $miEdit.ForeColor = $cText; $miEdit.Tag = $rk
+    $miEdit.Add_Click({ Do-EditTask (Find-Rec $this.Tag) })
+    [void]$script:rowMenu.Items.Add($miEdit)
+
+    $miStatus = New-Object System.Windows.Forms.ToolStripMenuItem('Status'); $miStatus.ForeColor = $cText
+    $miStatus.DropDown.BackColor = $cBar; $miStatus.DropDown.ForeColor = $cText; $miStatus.DropDown.ShowImageMargin = $false
+    foreach ($s in $script:Statuses) {
+        if ($s.key -eq '__other__') { continue }
+        $mark = $(if ($s.key -eq $rec.status) { [char]0x2713 + ' ' } else { '' })
+        $si = New-Object System.Windows.Forms.ToolStripMenuItem($mark + $s.name); $si.ForeColor = $cText; $si.Tag = $rk; $si.Name = $s.name
+        $si.Add_Click({ Do-ChangeStatus (Find-Rec $this.Tag) $this.Name $false })
+        [void]$miStatus.DropDownItems.Add($si)
+    }
+    [void]$miStatus.DropDownItems.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+    $miNew = New-Object System.Windows.Forms.ToolStripMenuItem('New status...'); $miNew.ForeColor = $cText; $miNew.Tag = $rk
+    $miNew.Add_Click({ Do-NewStatus (Find-Rec $this.Tag) })
+    [void]$miStatus.DropDownItems.Add($miNew)
+    [void]$script:rowMenu.Items.Add($miStatus)
 })
 
 # ------------------------------------------------------------- dragging -----
