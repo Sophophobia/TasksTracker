@@ -66,12 +66,14 @@ for a working sample. In short:
 
 - **Project name** = file name (without `.md`), unless the file starts with
   `# Project: <name>`.
-- `##` headings = **status** sections, recognized by emoji or word
-  (`🔄`/In progress · `⏳`/Pending · `✅`/Done, plus WIP/Todo/Backlog/Done synonyms).
-- A **task** is `### #<id> · <title>` (id required; separator `·`, `-`, `:` or a
-  space). A status emoji at the start of the title overrides the section.
+- **Statuses are defined by a required `## Status legend`** — one status per line;
+  the line order is the display order; a line may set a color (`- In progress | #3b82f6`
+  or a name). No legend in any file → the panel shows "No status legend found".
+- `##` **status sections** group tasks under a legend status (the heading matches
+  a status name); auto-color by position when no color is given.
+- A **task** is `### #<id> · <title>` (id required; separator `·`, `-`, `:` or a space).
 - Any other `#` heading = an optional **category** shown as the row's tag.
-- Everything else (legends, notes, `- **File:** …`) is ignored.
+- Everything else (notes, `- **File:** …`) is ignored. Tasks outside any status → "Other".
 
 ## Usage
 
@@ -127,8 +129,8 @@ Reads open with `FileShare.ReadWrite` and tolerate a file being rewritten
 - Windows-only (WinForms). The dark scrollbar uses Windows dark-mode theming;
   on very old builds it falls back to the default scrollbar.
 - Read-only by design — it never edits your task files.
-- One status set (In progress / Pending / Done). Per-project **filtering** is on
-  the roadmap.
+- Statuses are whatever your `## Status legend` declares (any number, any names).
+- Per-project **filtering** and **drag-to-reorder** of sections are on the roadmap.
 
 ## License
 
@@ -196,12 +198,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 [`PROMPT.md`](PROMPT.md);可运行的样例见 [`TASKS.example.md`](TASKS.example.md)。简述:
 
 - **项目名** = 文件名(去掉 `.md`);若文件以 `# Project: <名字>` 开头,则以它为准。
-- `##` 标题 = **状态段**,靠 emoji 或英文词识别(`🔄`/In progress · `⏳`/Pending ·
-  `✅`/Done,另支持 WIP/Todo/Backlog/Done 等同义词)。
-- **任务** 是 `### #<编号> · <标题>`(编号必填;分隔符 `·`、`-`、`:` 或空格)。标题
-  开头的状态 emoji 会覆盖所在段。
+- **状态由必填的 `## Status legend` 定义** —— 每行一个状态;行的顺序即显示顺序;每行可设颜色
+  (`- In progress | #3b82f6` 或颜色名)。若没有任何文件含 legend,面板显示「No status legend found」。
+- `##` **状态段**把任务归到图例里的某个状态(段标题与状态名匹配);未设颜色时按位置自动配色。
+- **任务** 是 `### #<编号> · <标题>`(编号必填;分隔符 `·`、`-`、`:` 或空格)。
 - 其他 `#` 标题 = 可选的**分类**,作为该行标签显示。
-- 其余内容(图例、笔记、`- **File:** …`)一律忽略。
+- 其余内容(笔记、`- **File:** …`)一律忽略;不在任何状态段下的任务归到 **Other**。
 
 ## 用法
 
@@ -254,7 +256,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 - 仅 Windows(WinForms)。深色滚动条依赖 Windows 暗色主题,在很老的系统上会回退为
   默认滚动条。
 - 设计上**只读**,绝不修改你的任务文件。
-- 目前只有一套状态(进行中 / 待办 / 完成)。按项目**筛选**已在路线图上。
+- 状态由你的 `## Status legend` 决定(任意数量、任意命名)。
+- 按项目**筛选**、分组**拖动排序**已在路线图上。
 
 ## 许可证
 

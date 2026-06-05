@@ -107,7 +107,7 @@ $ConfigPath = Join-Path $PSScriptRoot 'config.json'
 $script:Files     = @()      # list of absolute file paths to read
 $script:PosX = $null; $script:PosY = $null
 $script:PosW = 440; $script:PosH = 470
-$script:Collapsed = @{ InProgress = $false; Pending = $false; Done = $true }
+$script:Collapsed = @{}   # status key -> $true if that section is collapsed
 $script:Rolled    = $false   # window collapsed to just the title bar
 $script:lastUpdateCheck = 0  # epoch seconds of last update check
 
@@ -132,10 +132,9 @@ function Load-Config {
             if ($null -ne $c.rolled) { $script:Rolled = [bool]$c.rolled }
             if ($null -ne $c.lastUpdateCheck) { $script:lastUpdateCheck = [long]$c.lastUpdateCheck }
             if ($null -ne $c.collapsed) {
-                foreach ($k in 'InProgress','Pending','Done') {
-                    if ($null -ne $c.collapsed.$k) { $script:Collapsed[$k] = [bool]$c.collapsed.$k }
-                }
-            } elseif ($null -ne $c.doneCollapsed) { $script:Collapsed['Done'] = [bool]$c.doneCollapsed }
+                $script:Collapsed = @{}
+                foreach ($p in $c.collapsed.PSObject.Properties) { $script:Collapsed[$p.Name] = [bool]$p.Value }
+            }
         }
     } catch { }
 }
@@ -196,6 +195,86 @@ function Strip-StatusEmoji($title, $fallback) {
     return @($fallback, $title)
 }
 
+# Split a legend bullet "- [emoji] Name (desc) | color" -> @{ emoji; name; color }.
+function Parse-LegendLine($text) {
+    $t = $text.Trim()
+    $color = $null
+    $bar = $t.LastIndexOf('|')
+    if ($bar -ge 0) { $color = $t.Substring($bar + 1).Trim(); $t = $t.Substring(0, $bar).Trim() }
+    $cs = $t.ToCharArray(); $i = 0
+    for (; $i -lt $cs.Length; $i++) {
+        $c = [int][char]$cs[$i]
+        $alnum = ($c -ge 48 -and $c -le 57) -or ($c -ge 65 -and $c -le 90) -or ($c -ge 97 -and $c -le 122)
+        $cjk   = ($c -ge 0x3400 -and $c -le 0x9FFF) -or ($c -ge 0x3040 -and $c -le 0x30FF) -or ($c -ge 0xAC00 -and $c -le 0xD7AF)
+        if ($alnum -or $cjk) { break }
+    }
+    $emoji = ($t.Substring(0, $i)).Trim()
+    $rest  = $t.Substring($i)
+    $p = $rest.IndexOf('(')
+    $name = $(if ($p -ge 0) { $rest.Substring(0, $p) } else { $rest }).Trim()
+    return @{ emoji = $emoji; name = $name; color = $color }
+}
+
+# Extract the status definitions from a file's "## Status legend" section.
+function Parse-Legend($raw) {
+    $out = @()
+    if ([string]::IsNullOrEmpty($raw)) { return $out }
+    $inLegend = $false
+    foreach ($line in ($raw -split "`n")) {
+        $line = $line.TrimEnd("`r")
+        if ($line -match '^##\s') {
+            if ($line -match '(?i)status\s+legend') { $inLegend = $true; continue }
+            elseif ($inLegend) { break }
+        }
+        if ($inLegend) {
+            if ($line -match '^\s*-\s+(.+?)\s*$') { $p = Parse-LegendLine $matches[1]; if ($p.name) { $out += $p } }
+            elseif ($line -match '^#') { break }
+        }
+    }
+    return $out
+}
+
+# Build $script:Statuses from the union of all files' legends (first-seen order).
+function Build-Statuses($raws) {
+    $ordered = @(); $seen = @{}
+    foreach ($raw in $raws) {
+        foreach ($st in (Parse-Legend $raw)) {
+            $k = $st.name.ToLower()
+            if (-not $seen.ContainsKey($k)) {
+                $seen[$k] = $true
+                $ordered += [pscustomobject]@{ key = $k; name = $st.name; emoji = $st.emoji; color = $st.color; colorObj = $null }
+            }
+        }
+    }
+    $i = 0
+    foreach ($s in $ordered) {
+        $c = $(if ($s.color) { Resolve-Color $s.color } else { $null })
+        if (-not $c) { $c = $script:Palette[$i % $script:Palette.Count] }
+        $s.colorObj = $c; $i++
+    }
+    $script:Statuses = $ordered
+}
+
+# Match a heading to a status key: emoji first, then the longest status name found.
+function Match-StatusInText($text) {
+    foreach ($s in $script:Statuses) { if ($s.emoji -and $text.Contains($s.emoji)) { return $s.key } }
+    $lower = $text.ToLower(); $best = $null; $bestLen = -1
+    foreach ($s in $script:Statuses) {
+        if ($s.key.Length -gt 0 -and $lower.Contains($s.key) -and $s.key.Length -gt $bestLen) { $best = $s.key; $bestLen = $s.key.Length }
+    }
+    return $best
+}
+
+# If a title starts with a status's emoji, return @(key, strippedTitle); else @($null, title).
+function Match-InlineStatus($title) {
+    foreach ($s in $script:Statuses) {
+        if ($s.emoji -and ($title -match ('^\s*' + [regex]::Escape($s.emoji)))) {
+            return @($s.key, ($title -replace ('^\s*' + [regex]::Escape($s.emoji) + '\s*'), ''))
+        }
+    }
+    return @($null, $title)
+}
+
 # Parse one file's text into task records. $defaultProject is the fallback
 # project name (the file name); a `# Project: X` line overrides it.
 function Parse-File($raw, $defaultProject) {
@@ -209,7 +288,7 @@ function Parse-File($raw, $defaultProject) {
     }
 
     $area = ''
-    $section = 'Pending'
+    $section = $null   # current status key (from the matched `## ` section)
     foreach ($line in ($raw -split "`n")) {
         $line = $line.TrimEnd("`r")
 
@@ -219,20 +298,17 @@ function Parse-File($raw, $defaultProject) {
         elseif ($line -match $script:rxTaskId)  { $m = @($matches[1], $matches[2], '') }
         if ($m) {
             $id = $m[0] + $m[1]
-            $r = Strip-StatusEmoji $m[2] $section
+            $inl = Match-InlineStatus $m[2]
+            $stKey = $(if ($inl[0]) { $inl[0] } elseif ($section) { $section } else { '__other__' })
             $recs += [pscustomobject]@{
-                id = $id; status = $r[0]; area = $area; project = $project; task = ([string]$r[1]).Trim()
+                id = $id; status = $stKey; area = $area; project = $project; task = ([string]$inl[1]).Trim()
             }
             continue
         }
 
         if ($line -match '^##\s') {
-            if     ($line.Contains($G.inprog))  { $section = 'InProgress' }
-            elseif ($line.Contains($G.pending)) { $section = 'Pending' }
-            elseif ($line.Contains($G.done))    { $section = 'Done' }
-            elseif ($line -match '(?i)\b(in[\s-]?progress|wip|doing|ongoing)\b')       { $section = 'InProgress' }
-            elseif ($line -match '(?i)\b(pending|to[\s-]?do|backlog|planned|later)\b') { $section = 'Pending' }
-            elseif ($line -match '(?i)\b(done|complete[d]?|finished|shipped)\b')        { $section = 'Done' }
+            $ms = Match-StatusInText $line
+            $section = $(if ($ms) { $ms } else { '__other__' })   # unrecognized section -> Other
             continue
         }
 
@@ -258,9 +334,42 @@ $cInProg = [System.Drawing.Color]::FromArgb(59,130,246)
 $cPending= [System.Drawing.Color]::FromArgb(245,158,11)
 $cDone   = [System.Drawing.Color]::FromArgb(34,197,94)
 
-function StatusColor($st) {
-    switch ($st) { 'InProgress' { return $cInProg } 'Done' { return $cDone } default { return $cPending } }
+# Color palette assigned to statuses by legend order when a status has no
+# explicit "| color". (Documented in PROMPT.md.)
+$script:Palette = @(
+    [System.Drawing.Color]::FromArgb(59,130,246),   # blue
+    [System.Drawing.Color]::FromArgb(245,158,11),   # amber
+    [System.Drawing.Color]::FromArgb(34,197,94),    # green
+    [System.Drawing.Color]::FromArgb(168,85,247),   # purple
+    [System.Drawing.Color]::FromArgb(239,68,68),    # red
+    [System.Drawing.Color]::FromArgb(34,211,238),   # cyan
+    [System.Drawing.Color]::FromArgb(236,72,153),   # pink
+    [System.Drawing.Color]::FromArgb(148,163,184)   # gray
+)
+$script:NamedColors = @{
+    blue = $script:Palette[0]; amber = $script:Palette[1]; green = $script:Palette[2]
+    purple = $script:Palette[3]; red = $script:Palette[4]; cyan = $script:Palette[5]
+    pink = $script:Palette[6]; gray = $script:Palette[7]
 }
+$cOther = $script:Palette[7]
+
+# Statuses come entirely from the files' "## Status legend" (built each refresh).
+# Each: @{ key (lowercased name); name; emoji; color (raw); colorObj }
+$script:Statuses = @()
+
+function Resolve-Color($s) {
+    $s = ([string]$s).Trim().ToLower()
+    if ($s -match '^#([0-9a-f]{6})$') {
+        return [System.Drawing.Color]::FromArgb(
+            [Convert]::ToInt32($s.Substring(1,2),16),
+            [Convert]::ToInt32($s.Substring(3,2),16),
+            [Convert]::ToInt32($s.Substring(5,2),16))
+    }
+    if ($script:NamedColors.ContainsKey($s)) { return $script:NamedColors[$s] }
+    return $null
+}
+function Get-Status($key) { foreach ($s in $script:Statuses) { if ($s.key -eq $key) { return $s } }; return $null }
+function StatusColor($key) { $s = Get-Status $key; if ($s) { return $s.colorObj }; return $cOther }
 
 # Fonts: Chinese text -> Microsoft YaHei UI, English -> Segoe UI (chosen per
 # string, since a single WinForms label can't font-fallback mid-text).
@@ -474,11 +583,7 @@ function Render-List($recs) {
     $content.SuspendLayout()
     $content.Controls.Clear()
 
-    $order = @(
-        @{ key='InProgress'; label='In progress'; color=$cInProg },
-        @{ key='Pending';    label='Pending';     color=$cPending },
-        @{ key='Done';       label='Done';        color=$cDone }
-    )
+    $order = @($script:Statuses | ForEach-Object { @{ key = $_.key; label = $_.name } })
 
     $taskX = 134
     $taskW = $cw - $taskX - 8
@@ -570,18 +675,36 @@ function Update-Now {
     $mt = Combined-Mtime
     if (-not $force -and $null -ne $script:LastMtime -and $mt -eq $script:LastMtime) { return }
 
-    $all = @()
+    # Read every file once (tolerant); skip the whole round if any is locked.
+    $entries = @()
     foreach ($f in $script:Files) {
         if (-not (Test-Path $f)) { continue }
         $raw = Read-TasksFile $f
-        if ($null -eq $raw) { return }    # locked mid-write: skip this round, retry
-        $all += Parse-File $raw (Get-ProjectName $f)
+        if ($null -eq $raw) { return }
+        $entries += @{ project = (Get-ProjectName $f); raw = $raw }
     }
 
+    Build-Statuses (@($entries | ForEach-Object { $_.raw }))
     $script:LastMtime = $mt
     $tip.SetToolTip($title, ($script:Files -join "`n"))
 
-    $sig = ($all | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.project,$_.id,$_.status,$_.area,$_.task }) -join "`n"
+    if ($script:Statuses.Count -eq 0) {
+        $script:LastSig = '__nolegend__'
+        Show-Empty ('No status legend found.' + "`n`n" + "Add a '## Status legend' section to a tracked file (see PROMPT.md).")
+        return
+    }
+
+    $all = @()
+    foreach ($e in $entries) { $all += Parse-File $e.raw $e.project }
+
+    # Append an "Other" status if any task didn't match a legend status.
+    if ((@($all | Where-Object { $_.status -eq '__other__' }).Count -gt 0) -and -not (Get-Status '__other__')) {
+        $script:Statuses += [pscustomobject]@{ key = '__other__'; name = 'Other'; emoji = ''; color = $null; colorObj = $cOther }
+    }
+
+    $statusSig = ($script:Statuses | ForEach-Object { $_.key + ':' + $_.colorObj.ToArgb() }) -join ','
+    $taskSig   = ($all | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.project,$_.id,$_.status,$_.area,$_.task }) -join "`n"
+    $sig = $statusSig + "`n" + $taskSig
     if (-not $force -and $sig -eq $script:LastSig) { return }
     $script:LastSig = $sig
 
@@ -724,10 +847,10 @@ $btnMenu.Add_Click({
 
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     $miExpand = New-Object System.Windows.Forms.ToolStripMenuItem('Expand all sections'); $miExpand.ForeColor = $cText
-    $miExpand.Add_Click({ foreach ($k in 'InProgress','Pending','Done') { $script:Collapsed[$k] = $false }; Save-Config; Update-Now -force })
+    $miExpand.Add_Click({ foreach ($s in $script:Statuses) { $script:Collapsed[$s.key] = $false }; Save-Config; Update-Now -force })
     [void]$menu.Items.Add($miExpand)
     $miCollapse = New-Object System.Windows.Forms.ToolStripMenuItem('Collapse all sections'); $miCollapse.ForeColor = $cText
-    $miCollapse.Add_Click({ foreach ($k in 'InProgress','Pending','Done') { $script:Collapsed[$k] = $true }; Save-Config; Update-Now -force })
+    $miCollapse.Add_Click({ foreach ($s in $script:Statuses) { $script:Collapsed[$s.key] = $true }; Save-Config; Update-Now -force })
     [void]$menu.Items.Add($miCollapse)
 
     $miRoll = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($script:Rolled) { 'Expand from title bar' } else { 'Collapse to title bar' })); $miRoll.ForeColor = $cText
