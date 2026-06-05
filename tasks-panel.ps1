@@ -513,6 +513,10 @@ $form.FormBorderStyle = 'None'
 $form.TopMost         = $true
 $form.ShowInTaskbar   = $false
 $form.BackColor       = $cBg
+# Expose a thin border band on all four sides that no docked child covers, so the
+# form itself receives mouse events there and can be resized from any edge/corner.
+$EdgeBand             = 5
+$form.Padding         = New-Object System.Windows.Forms.Padding($EdgeBand)
 $form.Width           = [Math]::Max($MinW, $script:PosW)
 $form.Height          = [Math]::Max($MinH, $script:PosH)
 $form.StartPosition   = 'Manual'
@@ -520,6 +524,18 @@ $form.StartPosition   = 'Manual'
 $screen = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
 if ($null -ne $script:PosX -and $null -ne $script:PosY) {
     $form.Location = New-Object System.Drawing.Point($script:PosX, $script:PosY)
+    # Guard against an off-screen saved position (e.g. a monitor was unplugged):
+    # if the window doesn't meaningfully overlap any screen, snap back on-screen.
+    $rect = New-Object System.Drawing.Rectangle($script:PosX, $script:PosY, $form.Width, $form.Height)
+    $onScreen = $false
+    foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
+        $i = [System.Drawing.Rectangle]::Intersect($scr.WorkingArea, $rect)
+        if ($i.Width -ge 80 -and $i.Height -ge 40) { $onScreen = $true; break }
+    }
+    if (-not $onScreen) {
+        $form.Location = New-Object System.Drawing.Point(($screen.Width - $form.Width - 14), 44)
+        $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y
+    }
 } else {
     $form.Location = New-Object System.Drawing.Point(($screen.Width - $form.Width - 14), 44)
 }
@@ -534,6 +550,7 @@ $form.Add_Paint({
 # ---- top bar ----
 $bar = New-Object System.Windows.Forms.Panel
 $bar.Height = $TitleH; $bar.Dock = 'Top'; $bar.BackColor = $cBar
+$bar.Cursor = 'Default'   # don't inherit the form's transient resize cursor
 $form.Controls.Add($bar)
 
 $title = New-Object System.Windows.Forms.Label
@@ -573,6 +590,7 @@ $title.SendToBack()
 # ---- scrollable content ----
 $content = New-Object System.Windows.Forms.Panel
 $content.Dock = 'Fill'; $content.BackColor = $cBg; $content.AutoScroll = $true
+$content.Cursor = 'Default'   # don't inherit the form's transient resize cursor
 $form.Controls.Add($content)
 $content.BringToFront()
 try {
@@ -1218,6 +1236,73 @@ $grip.Add_MouseUp({
         if ($script:LastRecs) { Render-List $script:LastRecs }
     }
 })
+
+# ---- resize from any edge / corner ----
+# The form exposes a thin border band (via $form.Padding) that no child control
+# covers, so it receives mouse events there. We classify which edge(s) the cursor
+# is near and resize the window accordingly, mirroring the corner grip.
+$script:edgeRsz  = $false
+$script:edgeZone = ''
+$EdgeM = 8   # px from an edge that counts as a resize grab
+
+function Get-EdgeZone($e) {
+    $w = $form.ClientSize.Width; $h = $form.ClientSize.Height
+    $l = $e.X -le $EdgeM; $r = $e.X -ge ($w - $EdgeM)
+    $t = $e.Y -le $EdgeM; $b = $e.Y -ge ($h - $EdgeM)
+    $z = ''
+    if     ($t) { $z += 'T' } elseif ($b) { $z += 'B' }
+    if     ($l) { $z += 'L' } elseif ($r) { $z += 'R' }
+    return $z
+}
+function Cursor-ForZone($z) {
+    switch ($z) {
+        'T'  { 'SizeNS' }   'B'  { 'SizeNS' }
+        'L'  { 'SizeWE' }   'R'  { 'SizeWE' }
+        'TL' { 'SizeNWSE' } 'BR' { 'SizeNWSE' }
+        'TR' { 'SizeNESW' } 'BL' { 'SizeNESW' }
+        default { 'Default' }
+    }
+}
+$form.Add_MouseDown({
+    param($s,$e)
+    if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) {
+        $z = Get-EdgeZone $e
+        if ($z -ne '') {
+            $script:edgeRsz = $true; $script:edgeZone = $z
+            $script:rszStart = [System.Windows.Forms.Cursor]::Position
+            $script:rszX = $form.Location.X; $script:rszY = $form.Location.Y
+            $script:rszW = $form.Width;      $script:rszH = $form.Height
+        }
+    }
+})
+$form.Add_MouseMove({
+    param($s,$e)
+    if ($script:edgeRsz) {
+        $p = [System.Windows.Forms.Cursor]::Position
+        $dx = $p.X - $script:rszStart.X; $dy = $p.Y - $script:rszStart.Y
+        $x = $script:rszX; $y = $script:rszY; $w = $script:rszW; $h = $script:rszH
+        if ($script:edgeZone.Contains('R')) { $w = $script:rszW + $dx }
+        if ($script:edgeZone.Contains('B')) { $h = $script:rszH + $dy }
+        if ($script:edgeZone.Contains('L')) { $w = $script:rszW - $dx; $x = $script:rszX + $dx }
+        if ($script:edgeZone.Contains('T')) { $h = $script:rszH - $dy; $y = $script:rszY + $dy }
+        if ($w -lt $MinW) { if ($script:edgeZone.Contains('L')) { $x -= ($MinW - $w) }; $w = $MinW }
+        if ($h -lt $MinH) { if ($script:edgeZone.Contains('T')) { $y -= ($MinH - $h) }; $h = $MinH }
+        $form.SetBounds($x, $y, $w, $h)
+    } else {
+        $form.Cursor = Cursor-ForZone (Get-EdgeZone $e)
+    }
+})
+$form.Add_MouseUp({
+    param($s,$e)
+    if ($script:edgeRsz) {
+        $script:edgeRsz = $false
+        $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y
+        $script:PosW = $form.Width;      $script:PosH = $form.Height
+        Save-Config
+        if ($script:LastRecs) { Render-List $script:LastRecs }
+    }
+})
+$form.Add_MouseLeave({ if (-not $script:edgeRsz) { $form.Cursor = 'Default' } })
 
 # ------------------------------------------------------------- timer --------
 $timer = New-Object System.Windows.Forms.Timer

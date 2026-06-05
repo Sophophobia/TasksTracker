@@ -78,7 +78,7 @@ for a working sample. In short:
 
 ## Usage
 
-- **Drag** the top bar to move; **drag the bottom-right grip** to resize.
+- **Drag** the top bar to move; **drag any edge or corner** (or the bottom-right grip) to resize.
 - **↻** refresh now · **▴** collapse to title bar · **☰** menu · **✕** close.
 - **Click a section header** to collapse/expand it.
 - **Click a row** to expand a long title; click again to collapse.
@@ -213,7 +213,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 
 ## 用法
 
-- **拖**顶栏移动;**拖**右下角小三角缩放。
+- **拖**顶栏移动;**拖任意边缘或角**(或右下角小三角)缩放。
 - **↻** 立即刷新 · **▴** 折叠成标题栏 · **☰** 菜单 · **✕** 关闭。
 - **点击段标题**折叠/展开该段。
 - **点击某行**展开长标题,再点收起。
