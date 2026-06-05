@@ -115,6 +115,7 @@ $script:lastUpdateCheck = 0  # epoch seconds of last update check
 # ---- update check state ----
 $RepoUrl    = 'https://github.com/Sophophobia/TasksTracker'
 $VersionUrl = 'https://raw.githubusercontent.com/Sophophobia/TasksTracker/main/VERSION'
+$ScriptUrl  = 'https://raw.githubusercontent.com/Sophophobia/TasksTracker/main/tasks-panel.ps1'
 $script:LocalVersion    = try { ([string](Get-Content (Join-Path $PSScriptRoot 'VERSION') -Raw)).Trim() } catch { '0' }
 $script:UpdateAvailable = $false
 $script:RemoteVersion   = $null
@@ -770,7 +771,7 @@ function New-DlgButton($text, $result, $accent) {
     }
     return $b
 }
-function Show-Message($text, $titleText, [switch]$yesNo) {
+function Show-Message($text, $titleText, [switch]$yesNo, $yesLabel = 'Open page') {
     $dlg = New-Object System.Windows.Forms.Form
     $dlg.FormBorderStyle = 'None'; $dlg.StartPosition = 'CenterScreen'
     $dlg.TopMost = $true; $dlg.ShowInTaskbar = $false; $dlg.BackColor = $cBg
@@ -792,10 +793,10 @@ function Show-Message($text, $titleText, [switch]$yesNo) {
     $msg.Size = New-Object System.Drawing.Size(298, 56); $dlg.Controls.Add($msg)
 
     if ($yesNo) {
-        $b1 = New-DlgButton 'Open page' ([System.Windows.Forms.DialogResult]::Yes) $true
-        $b1.Location = New-Object System.Drawing.Point(230, 110)
-        $b2 = New-DlgButton 'Later'     ([System.Windows.Forms.DialogResult]::No)  $false
-        $b2.Location = New-Object System.Drawing.Point(140, 110)
+        $b1 = New-DlgButton $yesLabel ([System.Windows.Forms.DialogResult]::Yes) $true
+        $b1.AutoSize = $true; $b1.Location = New-Object System.Drawing.Point(220, 110)
+        $b2 = New-DlgButton 'Later'   ([System.Windows.Forms.DialogResult]::No)  $false
+        $b2.Location = New-Object System.Drawing.Point(130, 110)
         $dlg.Controls.Add($b1); $dlg.Controls.Add($b2); $dlg.AcceptButton = $b1; $dlg.CancelButton = $b2
     } else {
         $b1 = New-DlgButton 'OK' ([System.Windows.Forms.DialogResult]::OK) $true
@@ -956,7 +957,10 @@ function Toggle-Roll { Set-Rolled (-not $script:Rolled) }
 # ------------------------------------------------------- update check -------
 function Open-Repo { try { Start-Process $RepoUrl } catch { } }
 
+# Compare versions: prefer dotted-version ordering (1.2.0 > 1.1.9); fall back to
+# integer, then to "any difference".
 function Is-Newer($remote, $local) {
+    try { return ([version]([string]$remote).Trim() -gt [version]([string]$local).Trim()) } catch { }
     $r = 0; $l = 0
     if ([int]::TryParse([string]$remote, [ref]$r) -and [int]::TryParse([string]$local, [ref]$l)) { return ($r -gt $l) }
     return ([bool]$remote -and ([string]$remote -ne [string]$local))
@@ -964,7 +968,49 @@ function Is-Newer($remote, $local) {
 
 function Update-UpdateUI {
     $dotUpd.Visible = $script:UpdateAvailable
-    if ($script:UpdateAvailable) { $tip.SetToolTip($dotUpd, ('Update available (v{0}; you have v{1}) - click to open' -f $script:RemoteVersion, $script:LocalVersion)) }
+    if ($script:UpdateAvailable) { $tip.SetToolTip($dotUpd, ('Update available (v{0}; you have v{1}) - click to update' -f $script:RemoteVersion, $script:LocalVersion)) }
+}
+
+# Synchronous fetch (used for the user-initiated update download).
+function Fetch-Url($url) {
+    try {
+        [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+        $req = [System.Net.HttpWebRequest]::Create($url); $req.Timeout = 15000; $req.ReadWriteTimeout = 15000; $req.UserAgent = 'TasksTracker'
+        $resp = $req.GetResponse(); $sr = New-Object System.IO.StreamReader($resp.GetResponseStream())
+        $t = $sr.ReadToEnd(); $sr.Close(); $resp.Close(); return $t
+    } catch { return $null }
+}
+
+# Download the latest script, verify it parses, overwrite this script + VERSION,
+# relaunch a fresh instance, and close this one. config.json (files/position) is
+# untouched so the new instance comes back the same.
+function Do-SelfUpdate {
+    $new = Fetch-Url $ScriptUrl
+    if (-not $new) { Show-Message 'Download failed (offline?).' 'Tasks Tracker' | Out-Null; return }
+    $self = $PSCommandPath
+    if (-not $self) { Show-Message 'Cannot locate the script to update.' 'Tasks Tracker' | Out-Null; return }
+    $tmp = (Join-Path $PSScriptRoot '_update.tmp.ps1')
+    try {
+        [System.IO.File]::WriteAllText($tmp, $new, (New-Object System.Text.UTF8Encoding($false)))
+        $errs = $null
+        [System.Management.Automation.Language.Parser]::ParseFile($tmp, [ref]$null, [ref]$errs) | Out-Null
+        if ($errs -and $errs.Count -gt 0) { [System.IO.File]::Delete($tmp); Show-Message 'The downloaded update looked invalid; kept the current version.' 'Tasks Tracker' | Out-Null; return }
+        [System.IO.File]::Copy($tmp, ([System.IO.Path]::GetFullPath($self)), $true)
+        [System.IO.File]::Delete($tmp)
+    } catch {
+        try { if (Test-Path $tmp) { [System.IO.File]::Delete($tmp) } } catch { }
+        Show-Message 'Could not write the update (file busy?).' 'Tasks Tracker' | Out-Null; return
+    }
+    $rv = Fetch-Url $VersionUrl
+    if ($rv) { try { Write-FileAtomic (Join-Path $PSScriptRoot 'VERSION') (([string]$rv).Trim()) | Out-Null } catch { } }
+    try { Start-Process powershell -ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-Sta','-WindowStyle','Hidden','-File',$self } catch { }
+    $form.Close()
+}
+
+# Offer to download + restart when an update is available.
+function Update-Flow {
+    $msg = ('An update is available (v{0}; you have v{1}).{2}Download it and restart now?' -f $script:RemoteVersion, $script:LocalVersion, "`n")
+    if (Show-Message $msg 'Tasks Tracker' -yesNo -yesLabel 'Update now') { Do-SelfUpdate }
 }
 
 # Fetch the remote VERSION in a separate runspace so the UI never blocks; the
@@ -1006,8 +1052,7 @@ function Poll-UpdateCheck {
             if (-not $remote) {
                 Show-Message 'Could not check for updates (offline?).' 'Tasks Tracker' | Out-Null
             } elseif ($script:UpdateAvailable) {
-                $msg = ('An update is available (v{0}; you have v{1}).{2}Open the project page?' -f $remote, $script:LocalVersion, "`n")
-                if (Show-Message $msg 'Tasks Tracker' -yesNo) { Open-Repo }
+                Update-Flow
             } else {
                 Show-Message ('You are on the latest version (v{0}).' -f $script:LocalVersion) 'Tasks Tracker' | Out-Null
             }
@@ -1019,7 +1064,7 @@ function Poll-UpdateCheck {
 $btnRefresh.Add_Click({ Update-Now -force })
 $btnClose.Add_Click({ $form.Close() })
 $btnRoll.Add_Click({ Toggle-Roll })
-$dotUpd.Add_Click({ Open-Repo })
+$dotUpd.Add_Click({ Update-Flow })
 
 $btnMenu.Add_Click({
     $menu = New-Object System.Windows.Forms.ContextMenuStrip
@@ -1064,9 +1109,9 @@ $btnMenu.Add_Click({
 
     [void]$menu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
     if ($script:UpdateAvailable) {
-        $miUpd = New-Object System.Windows.Forms.ToolStripMenuItem(('Update available (v{0}) - open page' -f $script:RemoteVersion))
+        $miUpd = New-Object System.Windows.Forms.ToolStripMenuItem(('Update available (v{0}) - update now' -f $script:RemoteVersion))
         $miUpd.ForeColor = [System.Drawing.Color]::FromArgb(245,158,11)
-        $miUpd.Add_Click({ Open-Repo })
+        $miUpd.Add_Click({ Update-Flow })
         [void]$menu.Items.Add($miUpd)
     }
     $miCheck = New-Object System.Windows.Forms.ToolStripMenuItem('Check for updates'); $miCheck.ForeColor = $cText
