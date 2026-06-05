@@ -1,0 +1,7 @@
+# User-local panel state (window position/size, chosen files, collapse state)
+config.json
+
+# Personal / machine-local files and scratch artifacts (never published)
+*.local.*
+_*
+*.log
