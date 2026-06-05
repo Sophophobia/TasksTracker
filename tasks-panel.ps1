@@ -350,11 +350,6 @@ $dotUpd.Font = $fDot; $dotUpd.AutoSize = $false; $dotUpd.Dock = 'Right'; $dotUpd
 $dotUpd.TextAlign = 'MiddleCenter'; $dotUpd.Visible = $false; $dotUpd.Cursor = 'Hand'
 $bar.Controls.Add($dotUpd)
 
-$lblTime = New-Object System.Windows.Forms.Label
-$lblTime.ForeColor = $cBarDim; $lblTime.Font = $fTime
-$lblTime.AutoSize = $false; $lblTime.Dock = 'Right'; $lblTime.Width = 70; $lblTime.TextAlign = 'MiddleRight'
-$bar.Controls.Add($lblTime)
-
 $btnRoll    = New-BarButton $G.rollUp  26
 $btnClose   = New-BarButton $G.close   30
 $btnMenu    = New-BarButton $G.menu    28
@@ -568,7 +563,7 @@ function Update-Now {
 
     if ($script:Files.Count -eq 0) {
         Show-Empty ('No task files loaded.' + "`n`n" + 'Menu (' + $G.menu + ')  ->  Add task file(s)...')
-        $lblTime.Text = ''; $script:LastMtime = $null; $script:LastSig = '__none__'
+        $script:LastMtime = $null; $script:LastSig = '__none__'
         return
     }
 
@@ -584,7 +579,6 @@ function Update-Now {
     }
 
     $script:LastMtime = $mt
-    $lblTime.Text = $G.refresh + ' ' + (Get-Date).ToString('HH:mm:ss')
     $tip.SetToolTip($title, ($script:Files -join "`n"))
 
     $sig = ($all | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.project,$_.id,$_.status,$_.area,$_.task }) -join "`n"
