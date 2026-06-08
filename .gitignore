@@ -1,6 +1,9 @@
 # User-local panel state (window position/size, chosen files, collapse state)
 config.json
 
+# Single-instance PID stamp (machine-local)
+panel.pid
+
 # Personal / machine-local files and scratch artifacts (never published)
 *.local.*
 _*

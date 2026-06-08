@@ -82,8 +82,15 @@ for a working sample. In short:
 - **↻** refresh now · **▴** collapse to title bar · **☰** menu · **✕** close.
 - **Click a section header** to collapse/expand it.
 - **Click a row** to expand a long title; click again to collapse.
+- **☰ menu → Wrap all titles** wraps *every* task title to its full text in one
+  click (*Unwrap all titles* collapses them back). The choice is remembered.
 - **Right-click a task** → *Edit task…* to rename it, or *Status ▸* to move it to
-  another status (or *New status…*). The change is written back to that file.
+  another status (or *New status…*, which lets you **pick a color** — a palette
+  swatch, a custom color, or *Auto*). The change is written back to that file.
+- **☰ menu → Manage statuses…** — a settings dialog to **add, delete, edit
+  (name + color), and reorder** all statuses. Deleting a status moves its tasks
+  to *no status* (the **Other** group); if it still has tasks you're asked first.
+  Changes are written back to your file(s)' `## Status legend`.
 - **Collapse to title bar:** click **▴** (or double-click the title bar) to roll
   the window up so only the title bar shows; do it again to expand. The state is
   remembered.
@@ -131,12 +138,16 @@ Reads open with `FileShare.ReadWrite` and tolerate a file being rewritten
 
 - Windows-only (WinForms). The dark scrollbar uses Windows dark-mode theming;
   on very old builds it falls back to the default scrollbar.
-- Writes only on an explicit edit (right-click → Edit/Status); otherwise it
-  never touches your files. Edits are applied in place + written back atomically
-  (temp file + copy-overwrite). If a file is auto-synced, a panel edit could be
-  overwritten by the sync — edit when sync is idle.
-- Statuses are whatever your `## Status legend` declares (any number, any names).
-- Per-project **filtering** and **drag-to-reorder** of sections are on the roadmap.
+- Writes only on an explicit edit (right-click → Edit/Status, or ☰ → Manage
+  statuses); otherwise it never touches your files. Edits are applied in place +
+  written back atomically (temp file + copy-overwrite). If a file is auto-synced,
+  a panel edit could be overwritten by the sync — edit when sync is idle.
+- Statuses are whatever your `## Status legend` declares (any number, any names);
+  manage them from ☰ → *Manage statuses…* (add / delete / edit / reorder).
+- **Single instance:** launching the panel again closes the previous window and
+  keeps only the newest one (tracked via a `panel.pid` stamp next to the script).
+- Per-project **filtering** and **drag-to-reorder** directly on the panel are on
+  the roadmap.
 
 ## License
 
@@ -217,8 +228,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 - **↻** 立即刷新 · **▴** 折叠成标题栏 · **☰** 菜单 · **✕** 关闭。
 - **点击段标题**折叠/展开该段。
 - **点击某行**展开长标题,再点收起。
-- **右键某个任务** → *Edit task…* 改名,或 *Status ▸* 移到别的状态(或 *New status…*);
-  改动会写回该文件。
+- **☰ 菜单 → Wrap all titles** 一键把*所有*任务标题展开成完整多行(*Unwrap all titles*
+  收起);该选择会被记住。
+- **右键某个任务** → *Edit task…* 改名,或 *Status ▸* 移到别的状态(或 *New status…*,
+  新建时可**选择颜色** —— 调色板色块、自定义颜色,或 *Auto* 自动配色);改动会写回该文件。
+- **☰ 菜单 → Manage statuses…** —— 一个设置面板,可**添加、删除、编辑(名字+颜色)、排序**
+  所有状态。删除某状态时,它名下的任务会归到**没有状态**(**Other** 组);若该状态仍有任务会先提示。
+  改动会写回各文件的 `## Status legend`。
 - **折叠成标题栏**:点 **▴**(或双击标题栏)把窗口卷起来只剩标题栏,再点一次展开;
   状态会被记住。
 
@@ -263,10 +279,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 
 - 仅 Windows(WinForms)。深色滚动条依赖 Windows 暗色主题,在很老的系统上会回退为
   默认滚动条。
-- 仅在你显式编辑时写入(右键 → Edit/Status),否则不碰你的文件。编辑就地应用并原子写回
-  (临时文件 + 覆盖)。若文件被 auto-sync 同步,面板的改动可能被同步覆盖 —— 同步空闲时再改。
-- 状态由你的 `## Status legend` 决定(任意数量、任意命名)。
-- 按项目**筛选**、分组**拖动排序**已在路线图上。
+- 仅在你显式编辑时写入(右键 → Edit/Status,或 ☰ → Manage statuses),否则不碰你的文件。
+  编辑就地应用并原子写回(临时文件 + 覆盖)。若文件被 auto-sync 同步,面板的改动可能被同步覆盖
+  —— 同步空闲时再改。
+- 状态由你的 `## Status legend` 决定(任意数量、任意命名);可在 ☰ → *Manage statuses…*
+  里管理(添加 / 删除 / 编辑 / 排序)。
+- **单实例:** 再次启动面板会自动关掉之前那个,只保留最新的窗口(靠脚本旁的 `panel.pid` 记录)。
+- 按项目**筛选**、在面板上直接**拖动排序**已在路线图上。
 
 ## 许可证
 

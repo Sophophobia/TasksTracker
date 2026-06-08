@@ -103,6 +103,7 @@ $G = @{
 
 # ------------------------------------------------------------- paths --------
 $ConfigPath = Join-Path $PSScriptRoot 'config.json'
+$PidFile    = Join-Path $PSScriptRoot 'panel.pid'
 
 # ------------------------------------------------------------- config -------
 $script:Files     = @()      # list of absolute file paths to read
@@ -110,6 +111,7 @@ $script:PosX = $null; $script:PosY = $null
 $script:PosW = 440; $script:PosH = 470
 $script:Collapsed = @{}   # status key -> $true if that section is collapsed
 $script:Rolled    = $false   # window collapsed to just the title bar
+$script:WrapAll   = $false   # wrap (expand) every task title to full text
 $script:lastUpdateCheck = 0  # epoch seconds of last update check
 
 # ---- update check state ----
@@ -132,6 +134,7 @@ function Load-Config {
             if ($null -ne $c.w)  { $script:PosW = [int]$c.w }
             if ($null -ne $c.h)  { $script:PosH = [int]$c.h }
             if ($null -ne $c.rolled) { $script:Rolled = [bool]$c.rolled }
+            if ($null -ne $c.wrapAll) { $script:WrapAll = [bool]$c.wrapAll }
             if ($null -ne $c.lastUpdateCheck) { $script:lastUpdateCheck = [long]$c.lastUpdateCheck }
             if ($null -ne $c.collapsed) {
                 $script:Collapsed = @{}
@@ -147,6 +150,7 @@ function Save-Config {
             files     = @($script:Files)
             x = $script:PosX; y = $script:PosY; w = $script:PosW; h = $script:PosH
             rolled = $script:Rolled
+            wrapAll = $script:WrapAll
             lastUpdateCheck = $script:lastUpdateCheck
             collapsed = $script:Collapsed
         }
@@ -335,35 +339,50 @@ function Task-Id($line) {
     return $null
 }
 
+# Find the line index of the task whose (area, id) match, tracking the current
+# "# <area>" heading exactly as Parse-File does (the `# Project:` line is not an
+# area). Returns -1 if not found. Matching on area+id rather than id alone lets
+# different areas reuse the same #ids without an edit hitting the wrong task.
+function Find-TaskLine($lines, $area, $id) {
+    $curArea = ''
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = $lines[$i]
+        if ($line -match '^#\s') {
+            if ($line -notmatch $script:rxProjSkip) { $curArea = Strip-LeadEmoji (($line -replace '^#\s+', '').Trim()) }
+            continue
+        }
+        $tid = Task-Id $line
+        if ($tid -and $tid -eq $id -and $curArea -eq $area) { return $i }
+    }
+    return -1
+}
+
 # Replace a task's title text in place (keeps level, #id, separator, and any
 # leading inline status emoji).
-function Set-TaskTitleText($text, $id, $newTitle) {
+function Set-TaskTitleText($text, $area, $id, $newTitle) {
     $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
     $lines = @($text -split "`r?`n")
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        if ((Task-Id $lines[$i]) -eq $id) {
-            $ln = $lines[$i]
-            $m = [regex]::Match($ln, $script:rxTaskSep)
-            if (-not $m.Success) { $m = [regex]::Match($ln, $script:rxTaskTxt) }
-            if ($m.Success) {
-                $g = $m.Groups[3]
-                $prefix = $ln.Substring(0, $g.Index)
-                $inl = Match-InlineStatus $g.Value
-                $lead = ''
-                if ($inl[0]) { $st = Get-Status $inl[0]; if ($st -and $st.emoji) { $lead = $st.emoji + ' ' } }
-                $lines[$i] = $prefix + $lead + $newTitle
-            } else {
-                $lines[$i] = $ln.TrimEnd() + ' ' + $G.mid + ' ' + $newTitle
-            }
-            break
-        }
+    $i = Find-TaskLine $lines $area $id
+    if ($i -lt 0) { return $text }
+    $ln = $lines[$i]
+    $m = [regex]::Match($ln, $script:rxTaskSep)
+    if (-not $m.Success) { $m = [regex]::Match($ln, $script:rxTaskTxt) }
+    if ($m.Success) {
+        $g = $m.Groups[3]
+        $prefix = $ln.Substring(0, $g.Index)
+        $inl = Match-InlineStatus $g.Value
+        $lead = ''
+        if ($inl[0]) { $st = Get-Status $inl[0]; if ($st -and $st.emoji) { $lead = $st.emoji + ' ' } }
+        $lines[$i] = $prefix + $lead + $newTitle
+    } else {
+        $lines[$i] = $ln.TrimEnd() + ' ' + $G.mid + ' ' + $newTitle
     }
     return ($lines -join $nl)
 }
 
 # Add a "- <name>" line to the file's "## Status legend" (no-op if absent or
 # already present).
-function Add-LegendStatusText($text, $name) {
+function Add-LegendStatusText($text, $name, $color = '') {
     $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
     $lines = @($text -split "`r?`n")
     $inLegend = $false; $legendHead = -1; $lastBullet = -1
@@ -382,19 +401,126 @@ function Add-LegendStatusText($text, $name) {
     }
     if ($legendHead -lt 0) { return $text }
     $at = $(if ($lastBullet -ge 0) { $lastBullet + 1 } else { $legendHead + 1 })
+    $bullet = $(if ([string]::IsNullOrWhiteSpace($color)) { "- $name" } else { "- $name | $color" })
     $arr = [System.Collections.ArrayList]@($lines)
-    [void]$arr.Insert($at, "- $name")
+    [void]$arr.Insert($at, $bullet)
     return ($arr -join $nl)
+}
+
+# Case-insensitive replace of the FIRST occurrence of $find in $s.
+function Replace-First($s, $find, $repl) {
+    if ([string]::IsNullOrEmpty($find)) { return $s }
+    $idx = $s.IndexOf($find, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($idx -lt 0) { return $s }
+    return $s.Substring(0, $idx) + $repl + $s.Substring($idx + $find.Length)
+}
+
+# Locate the "## Status legend" body: returns @(headIdx, endExclusive); bullets
+# live between headIdx+1 and endExclusive. @(-1,-1) when there's no legend.
+function Find-LegendRegion($lines) {
+    $head = -1
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $ln = $lines[$i]
+        if ($head -lt 0) {
+            if ($ln -match '^##\s' -and $ln -match '(?i)status\s+legend') { $head = $i }
+        } elseif ($ln -match '^#{1,6}\s') {
+            return @($head, $i)
+        }
+    }
+    if ($head -lt 0) { return @(-1, -1) }
+    return @($head, $lines.Count)
+}
+
+# Remove a status's bullet from the legend. Its "## <name>" task sections are
+# left in place; with no legend entry they no longer match, so their tasks fall
+# into the "Other" (no-status) group automatically.
+function Remove-LegendStatusText($text, $name) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = [System.Collections.ArrayList]@($text -split "`r?`n")
+    $reg = Find-LegendRegion $lines; if ($reg[0] -lt 0) { return $text }
+    for ($i = $reg[1] - 1; $i -ge $reg[0] + 1; $i--) {
+        if ($lines[$i] -match '^\s*-\s+(.+?)\s*$' -and (Parse-LegendLine $matches[1]).name.ToLower() -eq $name.ToLower()) {
+            $lines.RemoveAt($i)
+        }
+    }
+    return ($lines -join $nl)
+}
+
+# Set (or clear, when $color is blank) the "| color" on a status's legend bullet.
+function Set-LegendColorText($text, $name, $color) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = @($text -split "`r?`n")
+    $reg = Find-LegendRegion $lines; if ($reg[0] -lt 0) { return $text }
+    for ($i = $reg[0] + 1; $i -lt $reg[1]; $i++) {
+        if ($lines[$i] -match '^(\s*-\s+)(.+?)\s*$') {
+            $prefix = $matches[1]; $body = $matches[2]
+            if ((Parse-LegendLine $body).name.ToLower() -eq $name.ToLower()) {
+                $bar = $body.LastIndexOf('|'); if ($bar -ge 0) { $body = $body.Substring(0, $bar).TrimEnd() }
+                if (-not [string]::IsNullOrWhiteSpace($color)) { $body = $body + ' | ' + $color }
+                $lines[$i] = $prefix + $body
+                break
+            }
+        }
+    }
+    return ($lines -join $nl)
+}
+
+# Rename a status: rewrite its legend bullet and any matching "## <oldName>"
+# section headings (so the tasks under them stay grouped). Emoji / color / notes
+# on those lines are preserved (only the name token is swapped).
+function Rename-LegendStatusText($text, $oldName, $newName) {
+    if ($oldName.ToLower() -eq $newName.ToLower()) { return $text }
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = @($text -split "`r?`n")
+    $reg = Find-LegendRegion $lines
+    if ($reg[0] -ge 0) {
+        for ($i = $reg[0] + 1; $i -lt $reg[1]; $i++) {
+            if ($lines[$i] -match '^\s*-\s+(.+?)\s*$' -and (Parse-LegendLine $matches[1]).name.ToLower() -eq $oldName.ToLower()) {
+                $lines[$i] = Replace-First $lines[$i] $oldName $newName
+                break
+            }
+        }
+    }
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $ln = $lines[$i]
+        if ($ln -match '^##\s' -and $ln -notmatch '(?i)status\s+legend') {
+            $h = Strip-LeadEmoji (($ln -replace '^##\s+', '').Trim())
+            if ($h.ToLower() -eq $oldName.ToLower()) { $lines[$i] = Replace-First $ln $oldName $newName }
+        }
+    }
+    return ($lines -join $nl)
+}
+
+# Reorder the legend bullets to match $orderedNames (statuses not listed keep
+# their original relative order, after the listed ones). Non-bullet lines (blank
+# lines, comments) stay put.
+function Reorder-LegendText($text, $orderedNames) {
+    $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
+    $lines = @($text -split "`r?`n")
+    $reg = Find-LegendRegion $lines; if ($reg[0] -lt 0) { return $text }
+    $idx = @()
+    for ($i = $reg[0] + 1; $i -lt $reg[1]; $i++) { if ($lines[$i] -match '^\s*-\s+(.+?)\s*$') { $idx += $i } }
+    if ($idx.Count -le 1) { return $text }
+    $rank = @{}; $r = 0; foreach ($n in $orderedNames) { $rank[([string]$n).ToLower()] = $r; $r++ }
+    $items = @()
+    for ($k = 0; $k -lt $idx.Count; $k++) {
+        $null = $lines[$idx[$k]] -match '^\s*-\s+(.+?)\s*$'
+        $nm = (Parse-LegendLine $matches[1]).name.ToLower()
+        $rk = $(if ($rank.ContainsKey($nm)) { $rank[$nm] } else { 1000000 })
+        $items += [pscustomobject]@{ line = $lines[$idx[$k]]; rank = $rk; orig = $k }
+    }
+    $sorted = @($items | Sort-Object rank, orig)
+    for ($k = 0; $k -lt $idx.Count; $k++) { $lines[$idx[$k]] = $sorted[$k].line }
+    return ($lines -join $nl)
 }
 
 # Move a task's whole block (heading + following lines up to the next heading)
 # to the "## <statusName>" section within the SAME area (`# ...` group). Creates
 # the section at the end of the area if it doesn't exist there.
-function Move-TaskStatusText($text, $id, $statusName) {
+function Move-TaskStatusText($text, $area, $id, $statusName) {
     $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
     $arr = [System.Collections.ArrayList]@($text -split "`r?`n")
-    $s = -1
-    for ($i = 0; $i -lt $arr.Count; $i++) { if ((Task-Id $arr[$i]) -eq $id) { $s = $i; break } }
+    $s = Find-TaskLine $arr $area $id
     if ($s -lt 0) { return $text }
     $e = $arr.Count
     for ($i = $s + 1; $i -lt $arr.Count; $i++) { if ($arr[$i] -match '^#{1,6}\s') { $e = $i; break } }
@@ -730,7 +856,7 @@ function Render-List($recs) {
         $sorted = @($members | Sort-Object @{ Expression = { Id-Key $_.id } }, @{ Expression = { $_.project } }, @{ Expression = { $_.id } })
         foreach ($r in $sorted) {
             $rowKey = Row-Key $r
-            $expanded = [bool]$script:Expanded[$rowKey]
+            $expanded = $script:WrapAll -or [bool]$script:Expanded[$rowKey]
             $tag = if ($r.area) { $r.area } else { $r.project }
 
             $row = New-Object System.Windows.Forms.Panel
@@ -859,6 +985,112 @@ function Show-Input($promptText, $titleText, $default) {
     return $null
 }
 
+# Dark dialog to create/edit a status: a name plus an optional color. Returns
+# @{ name = <string>; color = <string> } (color is a palette name, a #rrggbb
+# hex, or '' for auto-by-position), or $null if cancelled.
+function Show-StatusEditor($titleText, $defaultName, $defaultColor) {
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.FormBorderStyle = 'None'; $dlg.StartPosition = 'CenterScreen'
+    $dlg.TopMost = $true; $dlg.ShowInTaskbar = $false; $dlg.BackColor = $cBg
+    $dlg.ClientSize = New-Object System.Drawing.Size(380, 222)
+    $dlg.Add_Paint({ param($s,$e)
+        $pen = New-Object System.Drawing.Pen ($cBorder), 1
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1); $pen.Dispose() })
+
+    $bar2 = New-Object System.Windows.Forms.Panel; $bar2.Dock = 'Top'; $bar2.Height = 30; $bar2.BackColor = $cBar
+    $ht = New-Object System.Windows.Forms.Label; $ht.Text = $G.ring + '  ' + $titleText; $ht.ForeColor = $cText; $ht.Font = $fBar
+    $ht.Dock = 'Fill'; $ht.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $ht.TextAlign = 'MiddleLeft'
+    $bar2.Controls.Add($ht); $dlg.Controls.Add($bar2)
+
+    $pl = New-Object System.Windows.Forms.Label; $pl.Text = 'Status name:'; $pl.ForeColor = $cDim; $pl.Font = $fTaskEn
+    $pl.AutoSize = $false; $pl.Location = New-Object System.Drawing.Point(16, 40); $pl.Size = New-Object System.Drawing.Size(348, 18); $dlg.Controls.Add($pl)
+
+    $tb = New-Object System.Windows.Forms.TextBox
+    $tb.Text = [string]$defaultName; $tb.BackColor = [System.Drawing.Color]::FromArgb(38,38,44); $tb.ForeColor = $cText
+    $tb.BorderStyle = 'FixedSingle'; $tb.Font = $fTaskEn
+    $tb.Location = New-Object System.Drawing.Point(16, 62); $tb.Size = New-Object System.Drawing.Size(348, 26)
+    $dlg.Controls.Add($tb)
+
+    $cl = New-Object System.Windows.Forms.Label; $cl.Text = 'Color:'; $cl.ForeColor = $cDim; $cl.Font = $fTaskEn
+    $cl.AutoSize = $false; $cl.Location = New-Object System.Drawing.Point(16, 96); $cl.Size = New-Object System.Drawing.Size(348, 18); $dlg.Controls.Add($cl)
+
+    # Selection state: '' = auto, a palette name, or a '#rrggbb' hex.
+    $script:nsSel = ([string]$defaultColor).Trim()
+    $script:nsSwatches = @()
+
+    $palNames = @('blue','amber','green','purple','red','cyan','pink','gray')
+    $sw = 30; $gap = 6; $x0 = 16; $y0 = 116
+    $i = 0
+    foreach ($pn in $palNames) {
+        $p = New-Object System.Windows.Forms.Panel
+        $p.Size = New-Object System.Drawing.Size($sw, 22)
+        $p.Location = New-Object System.Drawing.Point(($x0 + $i * ($sw + $gap)), $y0)
+        $p.Tag = $pn; $p.Cursor = 'Hand'
+        $tip.SetToolTip($p, $pn)
+        $p.Add_Paint({
+            param($s,$e)
+            $col = $script:NamedColors[[string]$s.Tag]
+            $br = New-Object System.Drawing.SolidBrush $col
+            $e.Graphics.FillRectangle($br, 0, 0, $s.Width, $s.Height); $br.Dispose()
+            if ($script:nsSel -eq [string]$s.Tag) {
+                $pen = New-Object System.Drawing.Pen ([System.Drawing.Color]::White), 2
+                $e.Graphics.DrawRectangle($pen, 1, 1, $s.Width - 3, $s.Height - 3); $pen.Dispose()
+            }
+        })
+        $p.Add_Click({ $script:nsSel = [string]$this.Tag; & $script:nsRefresh })
+        $dlg.Controls.Add($p); $script:nsSwatches += $p
+        $i++
+    }
+
+    $autoBtn = New-DlgButton 'Auto' ([System.Windows.Forms.DialogResult]::None) $false
+    $autoBtn.Size = New-Object System.Drawing.Size(84, 28); $autoBtn.Location = New-Object System.Drawing.Point(16, 150)
+    $tip.SetToolTip($autoBtn, 'Auto-color by position in the legend')
+    $autoBtn.Add_Click({ $script:nsSel = ''; & $script:nsRefresh })
+    $dlg.Controls.Add($autoBtn)
+
+    $custBtn = New-DlgButton 'Custom...' ([System.Windows.Forms.DialogResult]::None) $false
+    $custBtn.Size = New-Object System.Drawing.Size(96, 28); $custBtn.Location = New-Object System.Drawing.Point(108, 150)
+    $custBtn.Add_Click({
+        $cd = New-Object System.Windows.Forms.ColorDialog
+        $cd.FullOpen = $true
+        if ($script:nsSel -match '^#([0-9a-fA-F]{6})$') { $cd.Color = (Resolve-Color $script:nsSel) }
+        if ($cd.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+            $script:nsSel = ('#{0:x2}{1:x2}{2:x2}' -f $cd.Color.R, $cd.Color.G, $cd.Color.B)
+            & $script:nsRefresh
+        }
+    })
+    $dlg.Controls.Add($custBtn)
+
+    # Refresh selection visuals: redraw swatches and highlight Auto / Custom.
+    $script:nsRefresh = {
+        foreach ($p in $script:nsSwatches) { $p.Invalidate() }
+        $isAuto = ($script:nsSel -eq '')
+        $isHex  = ($script:nsSel -match '^#([0-9a-fA-F]{6})$')
+        $autoBtn.BackColor = $(if ($isAuto) { [System.Drawing.Color]::FromArgb(59,130,246) } else { $cBar })
+        $autoBtn.ForeColor = $(if ($isAuto) { [System.Drawing.Color]::White } else { $cText })
+        if ($isHex) {
+            $c = Resolve-Color $script:nsSel
+            $custBtn.BackColor = $c
+            $custBtn.ForeColor = $(if (($c.R*0.299 + $c.G*0.587 + $c.B*0.114) -gt 150) { [System.Drawing.Color]::Black } else { [System.Drawing.Color]::White })
+            $custBtn.Text = $script:nsSel
+        } else {
+            $custBtn.BackColor = $cBar; $custBtn.ForeColor = $cText; $custBtn.Text = 'Custom...'
+        }
+    }
+
+    $ok = New-DlgButton 'Save'   ([System.Windows.Forms.DialogResult]::OK)     $true
+    $ok.Location = New-Object System.Drawing.Point(280, 184)
+    $cn = New-DlgButton 'Cancel' ([System.Windows.Forms.DialogResult]::Cancel) $false
+    $cn.Location = New-Object System.Drawing.Point(190, 184)
+    $dlg.Controls.Add($ok); $dlg.Controls.Add($cn); $dlg.AcceptButton = $ok; $dlg.CancelButton = $cn
+
+    $dlg.Add_Shown({ $tb.Focus(); $tb.SelectAll(); & $script:nsRefresh })
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        return @{ name = $tb.Text; color = $script:nsSel }
+    }
+    return $null
+}
+
 # Atomic UTF-8 (no BOM) write: temp file + Replace, so a crash can't leave the
 # file half-written. Returns $false if the file is busy / write fails.
 function Write-FileAtomic($path, $text) {
@@ -971,6 +1203,16 @@ function Set-Rolled($rolled) {
     Save-Config
 }
 function Toggle-Roll { Set-Rolled (-not $script:Rolled) }
+
+# Wrap (expand) every task title to its full text in one click, or collapse them
+# all back. When on, every row wraps regardless of individual click-to-expand.
+function Set-WrapAll($on) {
+    $script:WrapAll = [bool]$on
+    if (-not $script:WrapAll) { $script:Expanded = @{} }   # turning off collapses all
+    Save-Config
+    Update-Now -force
+}
+function Toggle-WrapAll { Set-WrapAll (-not $script:WrapAll) }
 
 # ------------------------------------------------------- update check -------
 function Open-Repo { try { Start-Process $RepoUrl } catch { } }
@@ -1121,6 +1363,14 @@ $btnMenu.Add_Click({
     $miCollapse.Add_Click({ foreach ($s in $script:Statuses) { $script:Collapsed[$s.key] = $true }; Save-Config; Update-Now -force })
     [void]$menu.Items.Add($miCollapse)
 
+    $miWrap = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($script:WrapAll) { 'Unwrap all titles' } else { 'Wrap all titles' })); $miWrap.ForeColor = $cText
+    $miWrap.Add_Click({ Toggle-WrapAll })
+    [void]$menu.Items.Add($miWrap)
+
+    $miManage = New-Object System.Windows.Forms.ToolStripMenuItem('Manage statuses...'); $miManage.ForeColor = $cText
+    $miManage.Add_Click({ Show-ManageStatuses })
+    [void]$menu.Items.Add($miManage)
+
     $miRoll = New-Object System.Windows.Forms.ToolStripMenuItem($(if ($script:Rolled) { 'Expand from title bar' } else { 'Collapse to title bar' })); $miRoll.ForeColor = $cText
     $miRoll.Add_Click({ Toggle-Roll })
     [void]$menu.Items.Add($miRoll)
@@ -1158,21 +1408,187 @@ function Do-EditTask($rec) {
     $new = $new.Trim(); if (-not $new) { return }
     $raw = Read-TasksFile $rec.file
     if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
-    Save-FileChange $rec.file (Set-TaskTitleText $raw $rec.id $new)
+    Save-FileChange $rec.file (Set-TaskTitleText $raw $rec.area $rec.id $new)
 }
-function Do-ChangeStatus($rec, $statusName, $isNew) {
+function Do-ChangeStatus($rec, $statusName, $isNew, $color = '') {
     if (-not $rec) { return }
     $raw = Read-TasksFile $rec.file
     if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
-    if ($isNew) { $raw = Add-LegendStatusText $raw $statusName }
-    Save-FileChange $rec.file (Move-TaskStatusText $raw $rec.id $statusName)
+    if ($isNew) { $raw = Add-LegendStatusText $raw $statusName $color }
+    Save-FileChange $rec.file (Move-TaskStatusText $raw $rec.area $rec.id $statusName)
 }
 function Do-NewStatus($rec) {
     if (-not $rec) { return }
-    $name = Show-Input 'New status name:' 'New status' ''
-    if ($null -eq $name) { return }
-    $name = $name.Trim(); if (-not $name) { return }
-    Do-ChangeStatus $rec $name $true
+    $res = Show-StatusEditor 'New status' '' ''
+    if ($null -eq $res) { return }
+    $name = ([string]$res.name).Trim(); if (-not $name) { return }
+    Do-ChangeStatus $rec $name $true $res.color
+}
+
+# Apply a managed status model across every tracked file. $items is the final
+# ordered list (@{ name; color; origName; origColor }, origName=$null for new);
+# $origNames is the full set of names before editing (to detect deletions).
+function Save-StatusModel($items, $origNames) {
+    $kept = @{}
+    foreach ($it in $items) { if ($it.origName) { $kept[$it.origName.ToLower()] = $true } }
+    $deletions = @($origNames | Where-Object { -not $kept.ContainsKey(([string]$_).ToLower()) })
+    $order = @($items | ForEach-Object { $_.name })
+
+    $errors = 0
+    foreach ($f in $script:Files) {
+        $raw = Read-TasksFile $f
+        if ($null -eq $raw) { $errors++; continue }
+        $t = $raw
+        foreach ($d in $deletions) { $t = Remove-LegendStatusText $t $d }
+        foreach ($it in $items) {
+            if ($it.origName) {
+                if ($it.name -ne $it.origName) { $t = Rename-LegendStatusText $t $it.origName $it.name }
+                if (([string]$it.color) -ne ([string]$it.origColor)) { $t = Set-LegendColorText $t $it.name $it.color }
+            }
+        }
+        foreach ($it in $items) { if (-not $it.origName) { $t = Add-LegendStatusText $t $it.name $it.color } }
+        $t = Reorder-LegendText $t $order
+        if ($t -ne $raw) { if (-not (Write-FileAtomic $f $t)) { $errors++ } }
+    }
+    $script:LastMtime = $null; $script:LastSig = '__statusmgr__'; Update-Now -force
+    if ($errors) { Show-Message 'Some files were busy; not all changes were saved.' 'Tasks Tracker' | Out-Null }
+}
+
+# Settings dialog to manage all statuses: add / delete / edit (name + color) /
+# reorder. Deleting a status that has tasks asks first; its tasks fall into the
+# no-status ("Other") group. Changes are applied to every tracked file on Save.
+function Show-ManageStatuses {
+    if ($script:Statuses.Count -eq 0) {
+        Show-Message ('No statuses to manage.' + "`n`n" + 'Add a "## Status legend" to a tracked file first.') 'Tasks Tracker' | Out-Null
+        return
+    }
+    $orig = @($script:Statuses | Where-Object { $_.key -ne '__other__' })
+    $origNames = @($orig | ForEach-Object { $_.name })
+    $counts = @{}
+    foreach ($rr in $script:LastRecs) { $k = $rr.status; if (-not $counts.ContainsKey($k)) { $counts[$k] = 0 }; $counts[$k]++ }
+
+    $script:msItems = @()
+    foreach ($s in $orig) {
+        $c = $(if ($counts.ContainsKey($s.key)) { $counts[$s.key] } else { 0 })
+        $script:msItems += [pscustomobject]@{ name = $s.name; color = ([string]$s.color); origName = $s.name; origColor = ([string]$s.color); count = $c }
+    }
+
+    $dlg = New-Object System.Windows.Forms.Form
+    $dlg.FormBorderStyle = 'None'; $dlg.StartPosition = 'CenterScreen'
+    $dlg.TopMost = $true; $dlg.ShowInTaskbar = $false; $dlg.BackColor = $cBg
+    $dlg.ClientSize = New-Object System.Drawing.Size(420, 360)
+    $dlg.Add_Paint({ param($s,$e)
+        $pen = New-Object System.Drawing.Pen ($cBorder), 1
+        $e.Graphics.DrawRectangle($pen, 0, 0, $s.ClientSize.Width - 1, $s.ClientSize.Height - 1); $pen.Dispose() })
+
+    $bar2 = New-Object System.Windows.Forms.Panel; $bar2.Dock = 'Top'; $bar2.Height = 30; $bar2.BackColor = $cBar
+    $ht = New-Object System.Windows.Forms.Label; $ht.Text = $G.ring + '  Manage statuses'; $ht.ForeColor = $cText; $ht.Font = $fBar
+    $ht.Dock = 'Fill'; $ht.Padding = New-Object System.Windows.Forms.Padding(10,0,0,0); $ht.TextAlign = 'MiddleLeft'
+    $bar2.Controls.Add($ht); $dlg.Controls.Add($bar2)
+
+    $list = New-Object System.Windows.Forms.Panel
+    $list.Location = New-Object System.Drawing.Point(10, 40); $list.Size = New-Object System.Drawing.Size(400, 256)
+    $list.BackColor = $cBg; $list.AutoScroll = $true; $dlg.Controls.Add($list)
+
+    $mkBtn = {
+        param($txt, $w)
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $txt; $b.Font = $fTaskEn; $b.FlatStyle = 'Flat'; $b.Size = New-Object System.Drawing.Size($w, 24)
+        $b.BackColor = $cBar; $b.ForeColor = $cText; $b.FlatAppearance.BorderColor = $cBorder; $b.FlatAppearance.BorderSize = 1
+        return $b
+    }
+    $nameTaken = {
+        param($nm, $exceptIdx)
+        for ($j = 0; $j -lt $script:msItems.Count; $j++) {
+            if ($j -ne $exceptIdx -and $script:msItems[$j].name.ToLower() -eq ([string]$nm).ToLower()) { return $true }
+        }
+        return $false
+    }
+
+    $script:msRender = {
+        $list.Controls.Clear()
+        for ($i = 0; $i -lt $script:msItems.Count; $i++) {
+            $it = $script:msItems[$i]
+            $y = $i * 32 + 2
+
+            $sw = New-Object System.Windows.Forms.Panel
+            $sw.Size = New-Object System.Drawing.Size(16, 16); $sw.Location = New-Object System.Drawing.Point(6, ($y + 5))
+            $col = $(if ($it.color) { Resolve-Color $it.color } else { $null })
+            if (-not $col) { $col = $script:Palette[$i % $script:Palette.Count] }
+            $sw.BackColor = $col; $list.Controls.Add($sw)
+
+            $nl = New-Object System.Windows.Forms.Label
+            $nl.Text = $it.name; $nl.ForeColor = $cText; $nl.Font = (FTask $it.name)
+            $nl.AutoSize = $false; $nl.TextAlign = 'MiddleLeft'
+            $nl.Location = New-Object System.Drawing.Point(30, $y); $nl.Size = New-Object System.Drawing.Size(150, 26)
+            $list.Controls.Add($nl)
+
+            $cl = New-Object System.Windows.Forms.Label
+            $cl.Text = $(if ($it.count -gt 0) { "($($it.count))" } else { '' }); $cl.ForeColor = $cDim; $cl.Font = $fTime
+            $cl.AutoSize = $false; $cl.TextAlign = 'MiddleLeft'
+            $cl.Location = New-Object System.Drawing.Point(182, $y); $cl.Size = New-Object System.Drawing.Size(38, 26)
+            $list.Controls.Add($cl)
+
+            $up = & $mkBtn $G.rollUp 26; $up.Location = New-Object System.Drawing.Point(222, ($y + 1)); $up.Tag = $i
+            $up.Enabled = ($i -gt 0)
+            $up.Add_Click({ $i = [int]$this.Tag; $tmp = $script:msItems[$i-1]; $script:msItems[$i-1] = $script:msItems[$i]; $script:msItems[$i] = $tmp; & $script:msRender })
+            $list.Controls.Add($up)
+
+            $dn = & $mkBtn $G.triDown 26; $dn.Location = New-Object System.Drawing.Point(250, ($y + 1)); $dn.Tag = $i
+            $dn.Enabled = ($i -lt $script:msItems.Count - 1)
+            $dn.Add_Click({ $i = [int]$this.Tag; $tmp = $script:msItems[$i+1]; $script:msItems[$i+1] = $script:msItems[$i]; $script:msItems[$i] = $tmp; & $script:msRender })
+            $list.Controls.Add($dn)
+
+            $ed = & $mkBtn 'Edit' 46; $ed.Location = New-Object System.Drawing.Point(280, ($y + 1)); $ed.Tag = $i
+            $ed.Add_Click({
+                $i = [int]$this.Tag; $it = $script:msItems[$i]
+                $res = Show-StatusEditor 'Edit status' $it.name $it.color
+                if ($null -eq $res) { return }
+                $nm = ([string]$res.name).Trim(); if (-not $nm) { return }
+                if (& $script:msNameTaken $nm $i) { Show-Message ("A status named '$nm' already exists.") 'Tasks Tracker' | Out-Null; return }
+                $it.name = $nm; $it.color = $res.color; & $script:msRender
+            })
+            $list.Controls.Add($ed)
+
+            $del = & $mkBtn 'Del' 36; $del.Location = New-Object System.Drawing.Point(330, ($y + 1)); $del.Tag = $i
+            $del.ForeColor = [System.Drawing.Color]::FromArgb(248,113,113)
+            $del.Add_Click({
+                $i = [int]$this.Tag; $it = $script:msItems[$i]
+                if ($it.count -gt 0) {
+                    $ok = Show-Message ("'$($it.name)' has $($it.count) task(s); they'll move to no status.`n`nDelete this status?") 'Delete status' -yesNo -yesLabel 'Delete'
+                    if (-not $ok) { return }
+                }
+                $script:msItems = @($script:msItems | Where-Object { $_ -ne $it })
+                & $script:msRender
+            })
+            $list.Controls.Add($del)
+        }
+    }
+    # Expose helpers used inside the (script-scoped) render handlers.
+    $script:msNameTaken = $nameTaken
+
+    $addBtn = & $mkBtn 'Add status...' 110; $addBtn.Size = New-Object System.Drawing.Size(110, 28)
+    $addBtn.Location = New-Object System.Drawing.Point(10, 308)
+    $addBtn.Add_Click({
+        $res = Show-StatusEditor 'Add status' '' ''
+        if ($null -eq $res) { return }
+        $nm = ([string]$res.name).Trim(); if (-not $nm) { return }
+        if (& $script:msNameTaken $nm -1) { Show-Message ("A status named '$nm' already exists.") 'Tasks Tracker' | Out-Null; return }
+        $script:msItems = @($script:msItems) + [pscustomobject]@{ name = $nm; color = $res.color; origName = $null; origColor = ''; count = 0 }
+        & $script:msRender
+    })
+    $dlg.Controls.Add($addBtn)
+
+    $save = New-DlgButton 'Save'   ([System.Windows.Forms.DialogResult]::OK)     $true
+    $save.Location = New-Object System.Drawing.Point(326, 308)
+    $cancel = New-DlgButton 'Cancel' ([System.Windows.Forms.DialogResult]::Cancel) $false
+    $cancel.Location = New-Object System.Drawing.Point(236, 308)
+    $dlg.Controls.Add($save); $dlg.Controls.Add($cancel); $dlg.AcceptButton = $save; $dlg.CancelButton = $cancel
+
+    $dlg.Add_Shown({ & $script:msRender })
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        Save-StatusModel $script:msItems $origNames
+    }
 }
 
 # Shared right-click menu for task rows; rebuilt each time it opens from the
@@ -1310,7 +1726,37 @@ $timer.Interval = 2000
 $timer.Add_Tick({ Update-Now; Poll-UpdateCheck })
 $timer.Start()
 
+# Single instance: when a new copy launches, close any previous one so only the
+# newest window stays. We record our PID next to the script; a new instance reads
+# it, verifies that process is really one of ours (by command line, falling back
+# to process name), and closes it (graceful, then forced).
+function Enforce-SingleInstance {
+    try {
+        if (Test-Path $PidFile) {
+            $old = 0
+            if ([int]::TryParse((([string](Get-Content $PidFile -Raw)).Trim()), [ref]$old) -and $old -ne $PID) {
+                $proc = Get-Process -Id $old -ErrorAction SilentlyContinue
+                if ($proc -and -not $proc.HasExited) {
+                    $isOurs = $false
+                    try {
+                        $ci = Get-CimInstance Win32_Process -Filter "ProcessId=$old" -ErrorAction Stop
+                        if ($ci -and $ci.CommandLine -and $ci.CommandLine -match 'tasks-panel\.ps1') { $isOurs = $true }
+                    } catch {
+                        if (@('powershell','pwsh') -contains $proc.ProcessName) { $isOurs = $true }
+                    }
+                    if ($isOurs) {
+                        try { [void]$proc.CloseMainWindow(); if (-not $proc.WaitForExit(1500)) { $proc.Kill() } }
+                        catch { try { $proc.Kill() } catch { } }
+                    }
+                }
+            }
+        }
+    } catch { }
+    try { [System.IO.File]::WriteAllText($PidFile, [string]$PID) } catch { }
+}
+
 $form.Add_Shown({
+    Enforce-SingleInstance              # close any prior instance; keep only this one
     try { [Dark]::DarkScroll($content.Handle) } catch { }
     if ($script:Files.Count -eq 0) { Add-Files }   # first-run file picker
     Update-Now -force
@@ -1322,6 +1768,8 @@ $form.Add_FormClosing({
     $script:PosW = $form.Width
     if (-not $script:Rolled) { $script:PosH = $form.Height }   # keep the expanded height
     Save-Config; $timer.Stop()
+    # Remove our PID stamp only if it's still ours (a newer instance may own it now).
+    try { if ((Test-Path $PidFile) -and ((([string](Get-Content $PidFile -Raw)).Trim()) -eq [string]$PID)) { Remove-Item $PidFile -Force } } catch { }
 })
 
 [void][System.Windows.Forms.Application]::Run($form)
