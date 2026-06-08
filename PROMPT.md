@@ -32,28 +32,34 @@ read. One file = one project; you can track several at once.
 > - Optional color per line: `- In progress | #3b82f6` or a color name
 >   (blue, amber, green, red, purple, cyan, pink, gray).
 >
-> **Structure**
-> 1. *(Optional)* First line: `# Project: <Project Name>`.
-> 2. Group tasks under `##` **status sections** whose heading matches a status
->    name from the legend, e.g. `## In progress`, `## Done`.
-> 3. Each task is a `###` (or `####`) heading: `### #<id> · <title>`
->    - `#<id>`: a number, unique within the file, kept stable (e.g. `#12`).
->      Required, so the widget can tell tasks from ordinary headings.
->    - separator after the id: `·`, `-`, `:`, or just a space.
->    - `<title>`: one line; long titles are fine (the widget wraps them on click).
-> 4. *(Optional)* Any other `#` heading (not `# Project:`) groups tasks into a
->    named **category** shown as the row's tag.
-> 5. Everything else is ignored — notes, `- **File:** ...`, etc. are safe.
+> **Structure — free nesting by heading depth**
+> Headings classify themselves, so you can nest as deep as you like. For any
+> heading (other than `# Project:` and `## Status legend`):
+> - It's a **status** if its text matches a legend status (by name, or a leading
+>   status emoji). Status headings group the panel and can sit at any depth.
+> - It's a **task** if it's `#<id> · <title>` (the leaf). `#<id>` starts with a
+>   digit and is required, so the widget can tell tasks from headings. Separator
+>   after the id: `·`, `-`, `:`, or a space. Titles can be long (wrap on click).
+> - Otherwise it's an **intermediate level** (a category). Each becomes a column
+>   in the row, nested by markdown depth (`#` → `##` → `###` …).
+>
+> So the only fixed rules are: **a status somewhere above each task, and the task
+> as the leaf.** Any number of intermediate levels in between is fine — each one
+> adds a column (and a filter dropdown in the panel). A task with fewer levels
+> just leaves the trailing columns blank. Everything else (notes, `- **File:**
+> …`) is ignored.
+>
+> Ids only need to be unique **within their own branch** — the panel locates a
+> task by its full path, so `#1` can appear under different branches. (Unique
+> across the file is still the safest if you're unsure.)
 >
 > **What the panel does (so there are no surprises)**
-> - Groups appear in the legend's line order.
-> - A status with no `| color` is auto-colored by position: blue, amber, green,
->   purple, red, cyan, pink, gray (repeats after 8).
-> - If no file has a `## Status legend`, the panel shows "No status legend found"
->   instead of guessing.
-> - A task not under any recognized status section is shown under an **Other** group.
+> - Groups appear in the legend's line order; a status with no `| color` is
+>   auto-colored by position: blue, amber, green, purple, red, cyan, pink, gray.
+> - If no file has a `## Status legend`, it shows "No status legend found".
+> - A task with no status above it is shown under an **Other** group.
 >
-> **Example**
+> **Example — one level (status → task)**
 > ```markdown
 > # Project: Website Redesign
 >
@@ -64,14 +70,24 @@ read. One file = one project; you can track several at once.
 >
 > ## In progress
 > ### #1 · Rework the homepage hero section
-> ### #2 · Wire up the contact form
->
-> ## Pending
-> ### #3 · Add a dark-mode toggle
 >
 > ## Done
-> ### #4 · Set up the deploy pipeline
+> ### #2 · Set up the deploy pipeline
 > ```
+>
+> **Example — extra levels (status → Area → Sub-area → task)**
+> ```markdown
+> ## In progress
+> ### Career
+> #### WRA
+> ##### #1 · Fix the milestone stepper
+> #### CPC
+> ##### #3 · Trim the channel list
+> ### Wellness
+> #### #10 · Rework the welcome popup    (no sub-area → that column is blank)
+> ```
+> The panel shows two columns (`Career | WRA`, `Wellness |`) and two filter
+> dropdowns, one per level.
 >
 > When I ask you to update tasks: edit the file in place (move tasks between
 > status sections, add new ones with the next id), **keep the `## Status legend`**,
@@ -104,23 +120,28 @@ read. One file = one project; you can track several at once.
 > - 每行可选颜色:`- In progress | #3b82f6` 或颜色名
 >   (blue、amber、green、red、purple、cyan、pink、gray)。
 >
-> **结构**
-> 1. *(可选)* 首行:`# Project: <项目名>`。
-> 2. 用 `##` **状态段**分组,段标题需与图例里的某个状态名匹配,如 `## In progress`、`## Done`。
-> 3. 每条任务是 `###`(或 `####`)标题:`### #<编号> · <标题>`
->    - `#<编号>`:数字,文件内唯一且稳定(如 `#12`)。**必填** —— 挂件靠它区分任务和普通标题。
->    - 编号后的分隔符:`·`、`-`、`:` 或一个空格。
->    - `<标题>`:一行;很长也没关系,点击该行会展开换行显示。
-> 4. *(可选)* 其他 `#` 标题(非 `# Project:`)作为任务的**分类标签**显示。
-> 5. 其余内容一律忽略 —— 笔记、`- **File:** ...` 等都安全。
+> **结构 —— 按标题深度自由嵌套**
+> 标题会自我归类,所以你想嵌多深都行。对任意标题(除 `# Project:` 和 `## Status legend`):
+> - 文本与图例某状态匹配(名字,或开头的状态 emoji)→ 它是**状态**(分组),可在任意层。
+> - 形如 `#<编号> · <标题>` → 它是**任务**(最后一层)。`#<编号>` 数字开头、**必填**
+>   (挂件靠它区分任务和普通标题)。分隔符:`·`、`-`、`:` 或空格。标题可长(点击展开)。
+> - 其余 → **中间层级**(分类)。每一层在行里显示成一个**列**,按 markdown 深度
+>   (`#` → `##` → `###` …)决定父子。
+>
+> 所以唯一的硬规则是:**每条任务上面要有一个状态,任务本身是叶子。** 中间想加几层都行 ——
+> 每一层多一个列(面板里也多一个筛选下拉框)。某条任务层级少,后面的列就留空。其余内容
+> (笔记、`- **File:** …`)一律忽略。
+>
+> 编号只需在**自己这一支(branch)里唯一** —— 面板按完整路径定位任务,所以不同分支下可以都有
+> `#1`。(拿不准就全文件唯一,最稳妥。)
 >
 > **挂件的既定行为(避免意外):**
-> - 分组按图例行的顺序显示。
-> - 没写 `| 颜色` 的状态按位置自动配色:blue、amber、green、purple、red、cyan、pink、gray(超过 8 个循环)。
-> - 若没有任何文件含 `## Status legend`,面板显示「No status legend found」,不猜。
-> - 不在任何已识别状态段下的任务,归到 **Other** 分组。
+> - 分组按图例行顺序显示;没写 `| 颜色` 的状态按位置自动配色(blue、amber、green、purple、
+>   red、cyan、pink、gray)。
+> - 若没有任何文件含 `## Status legend`,显示「No status legend found」。
+> - 上面没有任何状态的任务,归到 **Other** 分组。
 >
-> **示例**
+> **示例 —— 一层(状态 → 任务)**
 > ```markdown
 > # Project: 网站改版
 >
@@ -131,14 +152,23 @@ read. One file = one project; you can track several at once.
 >
 > ## In progress
 > ### #1 · 重做首页 Hero 区
-> ### #2 · 接好联系表单
->
-> ## Pending
-> ### #3 · 加深色模式开关
 >
 > ## Done
-> ### #4 · 搭好部署流水线
+> ### #2 · 搭好部署流水线
 > ```
+>
+> **示例 —— 多层(状态 → 区域 → 子区域 → 任务)**
+> ```markdown
+> ## In progress
+> ### Career
+> #### WRA
+> ##### #1 · 修 milestone stepper
+> #### CPC
+> ##### #3 · 精简渠道列表
+> ### Wellness
+> #### #10 · 重做 welcome popup     (无子区域 → 该列留空)
+> ```
+> 面板会显示两列(`Career | WRA`、`Wellness |`)和两个筛选下拉框,每层一个。
 >
 > 当我让你更新任务时:就地编辑该文件(在状态段之间移动任务、用下一个编号新增),
 > **保留 `## Status legend`**,保持 **UTF-8**,不要把上面的结构改成别的形式。

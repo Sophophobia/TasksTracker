@@ -84,6 +84,34 @@ public static class Dark {
 "@
 [Dark]::SetAppDark()
 
+# Dark menu rendering: the default renderer paints menu chrome + hover/selected
+# highlight in light system colors, which washes out our light text. A custom
+# color table fixes every menu (context menus, submenus, the filter dropdowns)
+# at once via the process-wide ToolStripManager renderer.
+Add-Type -ReferencedAssemblies System.Windows.Forms,System.Drawing -TypeDefinition @"
+using System.Drawing;
+using System.Windows.Forms;
+public class DarkMenuColors : ProfessionalColorTable {
+    static readonly Color Bg = Color.FromArgb(28,28,32);
+    static readonly Color Hi = Color.FromArgb(58,62,72);
+    static readonly Color Bd = Color.FromArgb(60,60,68);
+    public override Color ToolStripDropDownBackground   { get { return Bg; } }
+    public override Color MenuItemSelected              { get { return Hi; } }
+    public override Color MenuItemSelectedGradientBegin { get { return Hi; } }
+    public override Color MenuItemSelectedGradientEnd   { get { return Hi; } }
+    public override Color MenuItemPressedGradientBegin  { get { return Hi; } }
+    public override Color MenuItemPressedGradientEnd    { get { return Hi; } }
+    public override Color MenuItemBorder                { get { return Hi; } }
+    public override Color MenuBorder                    { get { return Bd; } }
+    public override Color ImageMarginGradientBegin      { get { return Bg; } }
+    public override Color ImageMarginGradientMiddle     { get { return Bg; } }
+    public override Color ImageMarginGradientEnd        { get { return Bg; } }
+    public override Color SeparatorDark                 { get { return Bd; } }
+    public override Color SeparatorLight                { get { return Bd; } }
+}
+"@
+try { [System.Windows.Forms.ToolStripManager]::Renderer = (New-Object System.Windows.Forms.ToolStripProfessionalRenderer((New-Object DarkMenuColors))) } catch { }
+
 # ----------------------------------------------------- non-ASCII glyphs -----
 $G = @{
     inprog  = [char]::ConvertFromUtf32(0x1F504)   # cycle      (parse only)
@@ -113,6 +141,13 @@ $script:Collapsed = @{}   # status key -> $true if that section is collapsed
 $script:Rolled    = $false   # window collapsed to just the title bar
 $script:WrapAll   = $false   # wrap (expand) every task title to full text
 $script:lastUpdateCheck = 0  # epoch seconds of last update check
+
+# ---- nesting columns + per-level filters ----
+$script:LevelCount     = 0       # number of intermediate column levels currently shown
+$script:Filters        = @{}     # level index -> selected value ('' / $null = All)
+$script:FilterSig      = ''      # signature of the built filter dropdowns (rebuild only on change)
+$script:HasFilters     = $false  # whether the filter bar should show
+$script:FilterValueLabels = @()  # per-level value labels (to refresh shown selection)
 
 # ---- update check state ----
 $RepoUrl    = 'https://github.com/Sophophobia/TasksTracker'
@@ -284,6 +319,50 @@ function Match-InlineStatus($title) {
 # Parse one file's text into task records. $defaultProject is the fallback
 # project name (the file name); a `# Project: X` line overrides it. $path is the
 # source file (carried on each record so edits can be written back to it).
+# Classify a heading's text as a status: a leading legend emoji, or the stripped
+# text exactly equal to a status name. Stricter than Match-StatusInText (no
+# substring) so a structural level like "Done deals" isn't mistaken for a status.
+function Heading-StatusKey($headingText) {
+    foreach ($s in $script:Statuses) { if ($s.emoji -and $headingText.StartsWith($s.emoji)) { return $s.key } }
+    $stripped = (Strip-LeadEmoji $headingText).ToLower()
+    foreach ($s in $script:Statuses) { if ($s.key -eq $stripped) { return $s.key } }
+    return $null
+}
+
+# Walk a file's lines maintaining a heading stack (nested by markdown depth), and
+# return one entry per task: @{ index; id; title; cols; status; stack }. Headings
+# are classified per the free-nesting format: a `#<id>` heading is a task (leaf);
+# a heading matching the legend is a status (grouping); any other heading is a
+# structural level. A task's `cols` = its structural ancestors (outer->inner,
+# stripped of emoji), and `status` = its nearest status ancestor's key.
+function Walk-Tasks($lines) {
+    $out = @()
+    $stack = New-Object System.Collections.ArrayList
+    for ($i = 0; $i -lt $lines.Count; $i++) {
+        $line = ([string]$lines[$i]).TrimEnd("`r")
+        $m = $null
+        if     ($line -match $script:rxTaskSep) { $m = @($matches[1], $matches[2], $matches[3]) }
+        elseif ($line -match $script:rxTaskTxt) { $m = @($matches[1], $matches[2], $matches[3]) }
+        elseif ($line -match $script:rxTaskId)  { $m = @($matches[1], $matches[2], '') }
+        if ($m) {
+            $cols = @(); $st = $null
+            foreach ($e in $stack) { if ($e.isStatus) { $st = $e.key } else { $cols += $e.text } }
+            $out += @{ index = $i; id = ($m[0] + $m[1]); title = $m[2]; cols = @($cols); status = $st; stack = @($stack.ToArray()) }
+            continue
+        }
+        if ($line -match '^(#{1,6})\s+(.+?)\s*$') {
+            if ($line -match $script:rxProjSkip) { continue }   # the `# Project:` line isn't a level
+            $d = $matches[1].Length; $raw = $matches[2]
+            while ($stack.Count -gt 0 -and $stack[$stack.Count - 1].depth -ge $d) { $stack.RemoveAt($stack.Count - 1) }
+            if ($raw -match '(?i)^status\s+legend') { continue }   # the legend isn't a level
+            $sk = Heading-StatusKey $raw
+            if ($sk) { [void]$stack.Add(@{ depth = $d; raw = $raw; text = (Strip-LeadEmoji $raw); isStatus = $true;  key = $sk }) }
+            else     { [void]$stack.Add(@{ depth = $d; raw = $raw; text = (Strip-LeadEmoji $raw); isStatus = $false; key = $null }) }
+        }
+    }
+    return $out
+}
+
 function Parse-File($raw, $defaultProject, $path) {
     $recs = @()
     if ([string]::IsNullOrEmpty($raw)) { return $recs }
@@ -294,35 +373,11 @@ function Parse-File($raw, $defaultProject, $path) {
         if ($line -match $script:rxProj) { $project = $matches[1].Trim(); break }
     }
 
-    $area = ''
-    $section = $null   # current status key (from the matched `## ` section)
-    foreach ($line in ($raw -split "`n")) {
-        $line = $line.TrimEnd("`r")
-
-        $m = $null
-        if     ($line -match $script:rxTaskSep) { $m = @($matches[1], $matches[2], $matches[3]) }
-        elseif ($line -match $script:rxTaskTxt) { $m = @($matches[1], $matches[2], $matches[3]) }
-        elseif ($line -match $script:rxTaskId)  { $m = @($matches[1], $matches[2], '') }
-        if ($m) {
-            $id = $m[0] + $m[1]
-            $inl = Match-InlineStatus $m[2]
-            $stKey = $(if ($inl[0]) { $inl[0] } elseif ($section) { $section } else { '__other__' })
-            $recs += [pscustomobject]@{
-                id = $id; status = $stKey; area = $area; project = $project; task = ([string]$inl[1]).Trim(); file = $path
-            }
-            continue
-        }
-
-        if ($line -match '^##\s') {
-            $ms = Match-StatusInText $line
-            $section = $(if ($ms) { $ms } else { '__other__' })   # unrecognized section -> Other
-            continue
-        }
-
-        if ($line -match '^#\s') {
-            if ($line -match $script:rxProjSkip) { continue }   # the project line is not an area
-            $area = Strip-LeadEmoji (($line -replace '^#\s+', '').Trim())
-            continue
+    foreach ($t in (Walk-Tasks ($raw -split "`n"))) {
+        $inl = Match-InlineStatus $t.title
+        $stKey = $(if ($inl[0]) { $inl[0] } elseif ($t.status) { $t.status } else { '__other__' })
+        $recs += [pscustomobject]@{
+            id = $t.id; status = $stKey; cols = @($t.cols); project = $project; task = ([string]$inl[1]).Trim(); file = $path
         }
     }
     return $recs
@@ -339,30 +394,29 @@ function Task-Id($line) {
     return $null
 }
 
-# Find the line index of the task whose (area, id) match, tracking the current
-# "# <area>" heading exactly as Parse-File does (the `# Project:` line is not an
-# area). Returns -1 if not found. Matching on area+id rather than id alone lets
-# different areas reuse the same #ids without an edit hitting the wrong task.
-function Find-TaskLine($lines, $area, $id) {
-    $curArea = ''
-    for ($i = 0; $i -lt $lines.Count; $i++) {
-        $line = $lines[$i]
-        if ($line -match '^#\s') {
-            if ($line -notmatch $script:rxProjSkip) { $curArea = Strip-LeadEmoji (($line -replace '^#\s+', '').Trim()) }
-            continue
-        }
-        $tid = Task-Id $line
-        if ($tid -and $tid -eq $id -and $curArea -eq $area) { return $i }
+function Cols-Equal($a, $b) {
+    $a = @($a); $b = @($b)
+    if ($a.Count -ne $b.Count) { return $false }
+    for ($i = 0; $i -lt $a.Count; $i++) { if ([string]$a[$i] -ne [string]$b[$i]) { return $false } }
+    return $true
+}
+
+# Find the line index of the task whose (column path, id) match. Matching on the
+# full nesting path rather than id alone lets different branches reuse the same
+# #ids without an edit hitting the wrong task.
+function Find-TaskLine($lines, $cols, $id) {
+    foreach ($t in (Walk-Tasks $lines)) {
+        if ($t.id -eq $id -and (Cols-Equal $t.cols $cols)) { return $t.index }
     }
     return -1
 }
 
 # Replace a task's title text in place (keeps level, #id, separator, and any
 # leading inline status emoji).
-function Set-TaskTitleText($text, $area, $id, $newTitle) {
+function Set-TaskTitleText($text, $cols, $id, $newTitle) {
     $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
     $lines = @($text -split "`r?`n")
-    $i = Find-TaskLine $lines $area $id
+    $i = Find-TaskLine $lines $cols $id
     if ($i -lt 0) { return $text }
     $ln = $lines[$i]
     $m = [regex]::Match($ln, $script:rxTaskSep)
@@ -514,37 +568,74 @@ function Reorder-LegendText($text, $orderedNames) {
     return ($lines -join $nl)
 }
 
-# Move a task's whole block (heading + following lines up to the next heading)
-# to the "## <statusName>" section within the SAME area (`# ...` group). Creates
-# the section at the end of the area if it doesn't exist there.
-function Move-TaskStatusText($text, $area, $id, $statusName) {
+# Find-or-create a chain of headings in $arr. $path is an ordered list of
+# @{ depth; text; isStatus; key } from outer to inner. Returns the line index at
+# which the moved task block should be inserted (end of the deepest section,
+# creating any missing headings). Status levels match by legend key; structural
+# levels by emoji-stripped text.
+function Ensure-HeadingPath($arr, $path) {
+    $searchStart = 0; $searchEnd = $arr.Count
+    for ($k = 0; $k -lt $path.Count; $k++) {
+        $p = $path[$k]
+        $found = -1
+        for ($j = $searchStart; $j -lt $searchEnd; $j++) {
+            $ln = $arr[$j]
+            if ($ln -match ('^#{' + $p.depth + '}\s+(.+?)\s*$')) {
+                $htxt = $matches[1]; $ok = $false
+                if ($p.isStatus) { if ((Heading-StatusKey $htxt) -eq $p.key) { $ok = $true } }
+                else { if ((Strip-LeadEmoji $htxt) -eq (Strip-LeadEmoji $p.text)) { $ok = $true } }
+                if ($ok) { $found = $j; break }
+            } elseif ($p.depth -gt 1 -and $ln -match ('^#{1,' + ($p.depth - 1) + '}\s')) { break }
+        }
+        if ($found -ge 0) {
+            $searchStart = $found + 1
+            $ne = $searchEnd
+            for ($j = $found + 1; $j -lt $searchEnd; $j++) { if ($arr[$j] -match ('^#{1,' + $p.depth + '}\s')) { $ne = $j; break } }
+            $searchEnd = $ne
+        } else {
+            $ins = New-Object System.Collections.ArrayList
+            for ($q = $k; $q -lt $path.Count; $q++) { [void]$ins.Add((('#' * $path[$q].depth) + ' ' + $path[$q].text)) }
+            $arr.InsertRange($searchEnd, $ins)
+            return ($searchEnd + $ins.Count)
+        }
+    }
+    return $searchEnd
+}
+
+# Move a task's whole block (heading + following lines up to the next heading) to
+# its target status, keeping the same column path. The status heading in the
+# task's ancestor chain is swapped to <statusName> and the matching path is
+# found-or-created (works for status-outermost or area-outermost layouts).
+function Move-TaskStatusText($text, $cols, $id, $statusName) {
     $nl = $(if ($text -match "`r`n") { "`r`n" } else { "`n" })
     $arr = [System.Collections.ArrayList]@($text -split "`r?`n")
-    $s = Find-TaskLine $arr $area $id
-    if ($s -lt 0) { return $text }
+    $task = $null
+    foreach ($t in (Walk-Tasks $arr)) { if ($t.id -eq $id -and (Cols-Equal $t.cols $cols)) { $task = $t; break } }
+    if (-not $task) { return $text }
+    $s = $task.index
     $e = $arr.Count
     for ($i = $s + 1; $i -lt $arr.Count; $i++) { if ($arr[$i] -match '^#{1,6}\s') { $e = $i; break } }
     $block = @($arr.GetRange($s, $e - $s))
-
-    $areaStart = -1
-    for ($j = $s - 1; $j -ge 0; $j--) { if (($arr[$j] -match '^#\s') -and ($arr[$j] -notmatch '^##')) { $areaStart = $j; break } }
     $arr.RemoveRange($s, $e - $s)
 
-    $areaEnd = $arr.Count
-    for ($j = [Math]::Max($areaStart + 1, 0); $j -lt $arr.Count; $j++) { if (($arr[$j] -match '^#\s') -and ($arr[$j] -notmatch '^##')) { $areaEnd = $j; break } }
-    $from = $(if ($areaStart -ge 0) { $areaStart + 1 } else { 0 })
-    $key = $statusName.ToLower()
+    # Heading text for the target status (legend emoji + name when known).
+    $st = Get-Status ($statusName.ToLower())
+    $targetHead = $(if ($st -and $st.emoji) { $st.emoji + ' ' + $st.name } elseif ($st) { $st.name } else { $statusName })
 
-    $t = -1
-    for ($j = $from; $j -lt $areaEnd; $j++) { if (($arr[$j] -match '^##\s') -and ((Match-StatusInText $arr[$j]) -eq $key)) { $t = $j; break } }
-    if ($t -ge 0) {
-        $tEnd = $areaEnd
-        for ($j = $t + 1; $j -lt $areaEnd; $j++) { if ($arr[$j] -match '^#{1,2}\s') { $tEnd = $j; break } }
-        $arr.InsertRange($tEnd, $block)
-    } else {
-        $ins = [System.Collections.ArrayList]@(); [void]$ins.Add(''); [void]$ins.Add("## $statusName"); $ins.AddRange($block)
-        $arr.InsertRange($areaEnd, $ins)
+    # Build the target ancestor path from the task's original stack, swapping the
+    # status level. If the task had no status, add one as the deepest level.
+    $path = @(); $hadStatus = $false
+    foreach ($ae in $task.stack) {
+        if ($ae.isStatus) { $path += @{ depth = $ae.depth; text = $targetHead; isStatus = $true; key = $statusName.ToLower() }; $hadStatus = $true }
+        else { $path += @{ depth = $ae.depth; text = $ae.raw; isStatus = $false; key = $null } }
     }
+    if (-not $hadStatus) {
+        $deepest = 1; foreach ($p in $path) { if ($p.depth -gt $deepest) { $deepest = $p.depth } }
+        $path += @{ depth = ($deepest + 1); text = $targetHead; isStatus = $true; key = $statusName.ToLower() }
+    }
+
+    $insertAt = Ensure-HeadingPath $arr $path
+    $arr.InsertRange($insertAt, $block)
     return ($arr -join $nl)
 }
 
@@ -738,6 +829,15 @@ $grip.Add_Paint({
 })
 $form.Controls.Add($grip); $grip.BringToFront()
 
+# ---- filter bar (one dropdown per nesting level; built in Render-List) ----
+$filterBar = New-Object System.Windows.Forms.Panel
+$filterBar.Dock = 'Top'; $filterBar.Height = 30; $filterBar.BackColor = $cBar; $filterBar.Visible = $false
+$filterBar.Padding = New-Object System.Windows.Forms.Padding(8,4,8,4)
+$form.Controls.Add($filterBar)
+# Docking z-order (back->front edge): title bar at the very top, filter bar just
+# below it, content fills the rest, grip stays on top for painting.
+$bar.SendToBack(); $filterBar.BringToFront(); $content.BringToFront(); $grip.BringToFront()
+
 # ------------------------------------------------------------- rendering ----
 $script:LastMtime = $null
 $script:LastSig   = '__init__'
@@ -817,9 +917,127 @@ $script:onRowClick     = { Toggle-Expand  $this.Tag }
 $script:aTL  = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left
 $script:aTLR = [System.Windows.Forms.AnchorStyles]::Top -bor [System.Windows.Forms.AnchorStyles]::Left -bor [System.Windows.Forms.AnchorStyles]::Right
 
+# Value shown in column $i for a record: column 0 falls back to the project name
+# when the task has no nesting levels (preserves the old single-tag behavior);
+# deeper columns are '' when the task isn't that deep.
+function RowColVal($r, $i) {
+    $c = @($r.cols)
+    if ($i -eq 0) { if ($c.Count -gt 0) { return [string]$c[0] } else { return [string]$r.project } }
+    if ($c.Count -gt $i) { return [string]$c[$i] }
+    return ''
+}
+
+# A record passes if, for every level with an active filter, its value matches.
+function Passes-Filter($r) {
+    for ($i = 0; $i -lt $script:LevelCount; $i++) {
+        $sel = $script:Filters[$i]
+        if ($sel) { if ((RowColVal $r $i) -ne $sel) { return $false } }
+    }
+    return $true
+}
+
+# Build (or refresh) the per-level filter dropdowns -- one per nesting level, its
+# options being the distinct values seen at that level. The combo controls are
+# rebuilt only when the level count / option sets change, so selections survive a
+# normal refresh.
+# A filter pick (from the dark dropdown menu). $this.Tag = @{ level; val }.
+$script:onFilterPick = {
+    $d = $this.Tag
+    if ($null -eq $d.val -or $d.val -eq 'All') { $script:Filters.Remove($d.level) } else { $script:Filters[$d.level] = $d.val }
+    Render-List $script:LastRecs
+}
+# Open the dark options menu for one level, anchored under its dropdown control.
+function Open-FilterMenu($level, $opts, $anchor) {
+    $m = New-Object System.Windows.Forms.ContextMenuStrip
+    $m.BackColor = $cBar; $m.ForeColor = $cText; $m.ShowImageMargin = $false
+    $cur = $script:Filters[$level]
+    foreach ($label in (@('All') + @($opts))) {
+        $isSel = (($label -eq 'All') -and -not $cur) -or ($label -eq $cur)
+        $mark = $(if ($isSel) { [char]0x2713 + ' ' } else { '' })
+        $mi = New-Object System.Windows.Forms.ToolStripMenuItem($mark + $label); $mi.ForeColor = $cText
+        $mi.Tag = @{ level = $level; val = $label }
+        $mi.Add_Click($script:onFilterPick)
+        [void]$m.Items.Add($mi)
+    }
+    $m.Show($anchor, (New-Object System.Drawing.Point(0, $anchor.Height)))
+}
+$script:onFilterOpen = { $d = $this.Tag; Open-FilterMenu $d.level $d.opts $d.anchor }
+
+function Build-FilterBar($recs, $N) {
+    $opts = @()
+    for ($i = 0; $i -lt $N; $i++) {
+        $vals = @{}
+        foreach ($r in $recs) { $v = RowColVal $r $i; if ($v) { $vals[$v] = $true } }
+        $opts += ,@($vals.Keys | Sort-Object)
+    }
+    # Drop selections for levels that no longer exist / whose value disappeared.
+    foreach ($k in @($script:Filters.Keys)) {
+        if ($k -ge $N -or -not (@($opts[$k]) -contains $script:Filters[$k])) { $script:Filters.Remove($k) }
+    }
+    $script:HasFilters = ($N -ge 1 -and @($recs).Count -gt 0)
+
+    $cw = $form.ClientSize.Width
+    $sig = ([string]$N) + '|' + (($opts | ForEach-Object { $_ -join ',' }) -join ' || ') + '|w' + [int]($cw / 24)
+    if ($sig -ne $script:FilterSig) {
+        $script:FilterSig = $sig
+        $filterBar.Controls.Clear()
+        $script:FilterValueLabels = @()
+        $gap = 6; $x = 8
+        $colW = $(if ($N -gt 0) { [int][Math]::Floor((($cw - 16) - ($N - 1) * $gap) / $N) } else { 0 })
+        if ($colW -gt 150) { $colW = 150 }
+        if ($colW -lt 56)  { $colW = 56 }
+        for ($i = 0; $i -lt $N; $i++) {
+            $cell = New-Object System.Windows.Forms.Panel
+            $cell.Size = New-Object System.Drawing.Size($colW, 22)
+            $cell.Location = New-Object System.Drawing.Point($x, 3)
+            $cell.BackColor = [System.Drawing.Color]::FromArgb(38,38,44); $cell.Cursor = 'Hand'
+            $cell.Add_Paint({ param($s,$e)
+                $pen = New-Object System.Drawing.Pen ($cBorder), 1
+                $e.Graphics.DrawRectangle($pen, 0, 0, $s.Width - 1, $s.Height - 1); $pen.Dispose() })
+
+            $arrow = New-Object System.Windows.Forms.Label
+            $arrow.Text = $G.triDown; $arrow.Dock = 'Right'; $arrow.Width = 16
+            $arrow.ForeColor = $cDim; $arrow.Font = $fTaskEn; $arrow.TextAlign = 'MiddleCenter'
+            $arrow.BackColor = [System.Drawing.Color]::Transparent; $arrow.Cursor = 'Hand'
+            $cell.Controls.Add($arrow)
+
+            $val = New-Object System.Windows.Forms.Label
+            $val.Dock = 'Fill'; $val.TextAlign = 'MiddleLeft'; $val.AutoEllipsis = $true
+            $val.Font = $fTaskEn; $val.ForeColor = $cDim; $val.BackColor = [System.Drawing.Color]::Transparent
+            $val.Padding = New-Object System.Windows.Forms.Padding(6,0,0,0); $val.Cursor = 'Hand'
+            $cell.Controls.Add($val)
+
+            $d = @{ level = $i; opts = $opts[$i]; anchor = $cell }
+            $cell.Tag = $d; $val.Tag = $d; $arrow.Tag = $d
+            $cell.Add_Click($script:onFilterOpen); $val.Add_Click($script:onFilterOpen); $arrow.Add_Click($script:onFilterOpen)
+
+            $filterBar.Controls.Add($cell)
+            $script:FilterValueLabels += $val
+            $x += $colW + $gap
+        }
+    }
+    # Always refresh the shown selection text/color (rebuild may have been skipped).
+    for ($i = 0; $i -lt @($script:FilterValueLabels).Count; $i++) {
+        $lbl = $script:FilterValueLabels[$i]
+        if ($lbl) {
+            $sel = $script:Filters[$i]
+            $lbl.Text = $(if ($sel) { [string]$sel } else { 'All' })
+            $lbl.ForeColor = $(if ($sel) { $cText } else { $cDim })
+        }
+    }
+    $filterBar.Visible = ($script:HasFilters -and -not $script:Rolled)
+}
+
 function Render-List($recs) {
     if ($null -eq $recs) { return }
     $script:LastRecs = $recs
+
+    # Number of nesting-column levels (>=1 so the area/project tag always shows).
+    $N = 1
+    foreach ($r in $recs) { $cc = @($r.cols).Count; if ($cc -gt $N) { $N = $cc } }
+    $script:LevelCount = $N
+    Build-FilterBar $recs $N
+    $shown = @($recs | Where-Object { Passes-Filter $_ })
 
     $cw = $content.ClientSize.Width
     if ($cw -le 0) { $cw = $form.ClientSize.Width }
@@ -830,13 +1048,20 @@ function Render-List($recs) {
 
     $order = @($script:Statuses | ForEach-Object { @{ key = $_.key; label = $_.name } })
 
-    $taskX = 134
+    # Column geometry: #id (10..40), dot (42..56), then N tag columns from x=60,
+    # task label fills the rest. colW shrinks to fit when there are many levels.
+    $colX0 = 60; $minTaskW = 84
+    $avail = $cw - $colX0 - 8 - $minTaskW
+    $colW = 70
+    if ($N -gt 0) { $colW = [Math]::Min(70, [int][Math]::Floor($avail / $N)); if ($colW -lt 34) { $colW = 34 } }
+    $colStep = $colW + 4
+    $taskX = $colX0 + $N * $colStep
     $taskW = $cw - $taskX - 8
-    if ($taskW -lt 60) { $taskW = 60 }
+    if ($taskW -lt 50) { $taskW = 50 }
 
     $blocks = New-Object System.Collections.ArrayList
     foreach ($grp in $order) {
-        $members = @($recs | Where-Object { $_.status -eq $grp.key })
+        $members = @($shown | Where-Object { $_.status -eq $grp.key })
         if ($members.Count -eq 0) { continue }
         $collapsed = [bool]$script:Collapsed[$grp.key]
 
@@ -857,18 +1082,20 @@ function Render-List($recs) {
         foreach ($r in $sorted) {
             $rowKey = Row-Key $r
             $expanded = $script:WrapAll -or [bool]$script:Expanded[$rowKey]
-            $tag = if ($r.area) { $r.area } else { $r.project }
 
             $row = New-Object System.Windows.Forms.Panel
             $row.Dock = 'Top'; $row.BackColor = $cBg
             $row.Width = $cw   # set full width BEFORE sizing children so the task
                                # label's right-anchor margin is computed correctly
-                               # (otherwise the default ~200px row width stretches it)
 
             [void](New-RowLabel $row ('#'+$r.id) 10 30 $cDim $fIdEn 'MiddleLeft')
             [void](New-RowLabel $row $G.dot      42 14 (StatusColor $r.status) $fDot 'MiddleCenter')
-            $tl2 = New-RowLabel $row $tag        60 70 $cDim (FTag $tag) 'MiddleLeft'
-            $tip.SetToolTip($tl2, $(if ($r.area) { '{0}  ({1})' -f $r.area, $r.project } else { $r.project }))
+            for ($ci = 0; $ci -lt $N; $ci++) {
+                $cv = RowColVal $r $ci
+                $cx = $colX0 + $ci * $colStep
+                $cl = New-RowLabel $row $cv $cx $colW $cDim (FTag $cv) 'MiddleLeft'
+                if ($cv) { $tip.SetToolTip($cl, $cv) }
+            }
 
             $tl = New-Object System.Windows.Forms.Label
             $tl.Name = 'ltask'; $tl.Text = $r.task; $tl.ForeColor = $cText; $tl.Font = (FTask $r.task)
@@ -1159,7 +1386,7 @@ function Update-Now {
     }
 
     $statusSig = ($script:Statuses | ForEach-Object { $_.key + ':' + $_.colorObj.ToArgb() }) -join ','
-    $taskSig   = ($all | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.project,$_.id,$_.status,$_.area,$_.task }) -join "`n"
+    $taskSig   = ($all | ForEach-Object { '{0}|{1}|{2}|{3}|{4}' -f $_.project,$_.id,$_.status,(($_.cols) -join '>'),$_.task }) -join "`n"
     $sig = $statusSig + "`n" + $taskSig
     if (-not $force -and $sig -eq $script:LastSig) { return }
     $script:LastSig = $sig
@@ -1192,10 +1419,10 @@ function Remove-FilePath($path) {
 function Set-Rolled($rolled) {
     $script:Rolled = [bool]$rolled
     if ($script:Rolled) {
-        $content.Visible = $false; $grip.Visible = $false
+        $content.Visible = $false; $grip.Visible = $false; $filterBar.Visible = $false
         $form.Height = $TitleH + 1
     } else {
-        $content.Visible = $true; $grip.Visible = $true
+        $content.Visible = $true; $grip.Visible = $true; $filterBar.Visible = $script:HasFilters
         $form.Height = [Math]::Max($MinH, $script:PosH)
     }
     $btnRoll.Text = $(if ($script:Rolled) { $G.triDown } else { $G.rollUp })
@@ -1408,14 +1635,14 @@ function Do-EditTask($rec) {
     $new = $new.Trim(); if (-not $new) { return }
     $raw = Read-TasksFile $rec.file
     if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
-    Save-FileChange $rec.file (Set-TaskTitleText $raw $rec.area $rec.id $new)
+    Save-FileChange $rec.file (Set-TaskTitleText $raw $rec.cols $rec.id $new)
 }
 function Do-ChangeStatus($rec, $statusName, $isNew, $color = '') {
     if (-not $rec) { return }
     $raw = Read-TasksFile $rec.file
     if ($null -eq $raw) { Show-Message 'File is busy, try again.' 'Tasks Tracker' | Out-Null; return }
     if ($isNew) { $raw = Add-LegendStatusText $raw $statusName $color }
-    Save-FileChange $rec.file (Move-TaskStatusText $raw $rec.area $rec.id $statusName)
+    Save-FileChange $rec.file (Move-TaskStatusText $raw $rec.cols $rec.id $statusName)
 }
 function Do-NewStatus($rec) {
     if (-not $rec) { return }

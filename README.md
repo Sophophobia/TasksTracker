@@ -16,10 +16,15 @@ corner to see what's in progress / pending / done across all your projects.
 
 - A dark, compact list grouped into collapsible sections, ordered **🔄 In progress**
   → **⏳ Pending** → **✅ Done**. Each header shows its count, e.g. `▾ In progress (7)`.
-- Each row: `#id` · colored **status dot** (blue / amber / green) · a **tag**
-  (the in-file category, or the project name) · the task **title**.
+- Each row: `#id` · colored **status dot** (blue / amber / green) · one **tag
+  column per nesting level** · the task **title**. Nest your file as deep as you
+  like (status → area → sub-area → … → task); each intermediate level becomes a
+  column. A task with fewer levels leaves the trailing columns blank.
+- **Filters:** a row of dropdowns (one per nesting level) sits under the title
+  bar — pick a value to show only matching tasks. Options are whatever appears at
+  that level.
 - **Multiple files / projects** are merged into the same status groups; each row's
-  tag tells you which project (or category) it belongs to.
+  tag columns tell you which project / area it belongs to.
 - **Done** is collapsed by default. **Click a section header** to collapse/expand it.
 - Long titles are ellipsized; **click a row** to expand the full title (click again
   to collapse). Hovering also shows the full title as a tooltip.
@@ -172,9 +177,12 @@ MIT — see [`LICENSE`](LICENSE).
 
 - 深色紧凑列表,按状态分**可折叠**段:**🔄 进行中** → **⏳ 待办** → **✅ 完成**,
   每段标题带计数,如 `▾ In progress (7)`。
-- 每行:`#编号` · 彩色**状态点**(蓝 / 琥珀 / 绿) · 一个**标签**(文件内分类,或项目名)
-  · 任务**标题**。
-- **多文件 / 多项目**会合并进同一组状态里;每行的标签告诉你它属于哪个项目(或分类)。
+- 每行:`#编号` · 彩色**状态点**(蓝 / 琥珀 / 绿) · **每个嵌套层级一个标签列** · 任务**标题**。
+  文件想嵌多深都行(状态 → 区域 → 子区域 → … → 任务),每个中间层级就是一列;层级少的任务,
+  后面的列留空。
+- **筛选:** 标题栏下方有一排下拉框(每个嵌套层级一个),选一个值就只显示匹配的任务;
+  选项就是该层级出现过的值。
+- **多文件 / 多项目**会合并进同一组状态里;每行的标签列告诉你它属于哪个项目 / 区域。
 - **完成**默认折叠。**点击段标题**即可折叠/展开。
 - 标题过长会省略;**点击该行**展开完整标题(再点收起),悬停也有完整提示。
 - 顶栏显示最后刷新时间。中文用微软雅黑、英文用 Segoe UI 渲染。
