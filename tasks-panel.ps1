@@ -112,6 +112,23 @@ public class DarkMenuColors : ProfessionalColorTable {
 "@
 try { [System.Windows.Forms.ToolStripManager]::Renderer = (New-Object System.Windows.Forms.ToolStripProfessionalRenderer((New-Object DarkMenuColors))) } catch { }
 
+# Re-assert always-on-top without stealing focus (a plain TopMost window can be
+# pushed below other topmost windows; this re-pins it to the top of the band).
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class Native {
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int X, int Y, int cx, int cy, uint flags);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll")] static extern int GetWindowThreadProcessId(IntPtr h, out int pid);
+    static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    const uint SWP_NOSIZE=0x1, SWP_NOMOVE=0x2, SWP_NOACTIVATE=0x10, SWP_SHOWWINDOW=0x40;
+    public static void PinTop(IntPtr h)  { try { SetWindowPos(h, HWND_TOPMOST, 0,0,0,0, SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE); } catch {} }
+    public static void ShowTop(IntPtr h) { try { SetWindowPos(h, HWND_TOPMOST, 0,0,0,0, SWP_NOSIZE|SWP_NOMOVE|SWP_NOACTIVATE|SWP_SHOWWINDOW); } catch {} }
+    public static int ForegroundPid() { int p = 0; try { GetWindowThreadProcessId(GetForegroundWindow(), out p); } catch {} return p; }
+}
+"@
+
 # ----------------------------------------------------- non-ASCII glyphs -----
 $G = @{
     inprog  = [char]::ConvertFromUtf32(0x1F504)   # cycle      (parse only)
@@ -148,6 +165,11 @@ $script:Filters        = @{}     # level index -> selected value ('' / $null = A
 $script:FilterSig      = ''      # signature of the built filter dropdowns (rebuild only on change)
 $script:HasFilters     = $false  # whether the filter bar should show
 $script:FilterValueLabels = @()  # per-level value labels (to refresh shown selection)
+
+# ---- auto-hide while a screen-capture tool is active (so it isn't in the way) ----
+$script:autoHidden = $false
+$script:snipProcs  = @('screenclippinghost','snippingtool','screensketch','snagiteditor','snagit32',
+                       'greenshot','sharex','flameshot','picpick','lightshot','snip','snagitcapture')
 
 # ---- update check state ----
 $RepoUrl    = 'https://github.com/Sophophobia/TasksTracker'
@@ -838,11 +860,27 @@ $form.Controls.Add($filterBar)
 # below it, content fills the rest, grip stays on top for painting.
 $bar.SendToBack(); $filterBar.BringToFront(); $content.BringToFront(); $grip.BringToFront()
 
+# ---- sticky section header: while scrolling within a section, pin that
+# section's header at the top so you always know which group you're looking at.
+$sticky = New-Object System.Windows.Forms.Panel
+$sticky.Height = $HeadH; $sticky.BackColor = $cBand; $sticky.Visible = $false; $sticky.Cursor = 'Hand'
+$stickyLbl = New-Object System.Windows.Forms.Label
+$stickyLbl.Dock = 'Fill'; $stickyLbl.Font = $fHead; $stickyLbl.ForeColor = $cHead
+$stickyLbl.BackColor = [System.Drawing.Color]::Transparent
+$stickyLbl.Padding = New-Object System.Windows.Forms.Padding(8,0,0,0); $stickyLbl.TextAlign = 'MiddleLeft'; $stickyLbl.Cursor = 'Hand'
+$sticky.Controls.Add($stickyLbl)
+$form.Controls.Add($sticky)
+$sticky.Add_Click({ if ($sticky.Tag) { Toggle-Section ([string]$sticky.Tag) } })
+$stickyLbl.Add_Click({ if ($sticky.Tag) { Toggle-Section ([string]$sticky.Tag) } })
+$sticky.BringToFront()
+$content.Add_Scroll({ Update-Sticky })
+
 # ------------------------------------------------------------- rendering ----
 $script:LastMtime = $null
 $script:LastSig   = '__init__'
 $script:LastRecs  = @()
 $script:Expanded  = @{}     # row key -> $true (session-only)
+$script:SectionHeaders = @() # @{ ctl; key; label } per rendered section (for sticky header)
 
 function New-RowLabel($parent, $text, $x, $w, $color, $font, $align) {
     $l = New-Object System.Windows.Forms.Label
@@ -864,6 +902,27 @@ function Toggle-Section($key) {
     $script:Collapsed[$key] = -not $script:Collapsed[$key]
     Save-Config
     Render-List $script:LastRecs
+}
+
+# Keep the current section's header pinned at the top of the list while scrolling.
+# The current section = the rendered header that has scrolled to/above the top
+# edge (its .Top is most negative-but-closest-to-0). Hidden when the real header
+# is already at the top, when rolled, or when there's nothing scrolled.
+function Update-Sticky {
+    try {
+        if ($script:Rolled -or -not $content.Visible -or @($script:SectionHeaders).Count -eq 0) { $sticky.Visible = $false; return }
+        $cur = $null
+        foreach ($h in $script:SectionHeaders) {
+            $top = $h.ctl.Top
+            if ($top -le 0 -and ($null -eq $cur -or $top -gt $cur.ctl.Top)) { $cur = $h }
+        }
+        if (($null -eq $cur) -or ($cur.ctl.Top -ge 0)) { $sticky.Visible = $false; return }
+        $stickyLbl.Text = $cur.label
+        $sticky.Tag = $cur.key
+        $sticky.SetBounds($content.Left, $content.Top, $content.ClientSize.Width, $HeadH)
+        if (-not $sticky.Visible) { $sticky.Visible = $true }
+        $sticky.BringToFront()
+    } catch { }
 }
 
 # Size the task label for its state and return the row height. Expanded uses an
@@ -1060,6 +1119,7 @@ function Render-List($recs) {
     if ($taskW -lt 50) { $taskW = 50 }
 
     $blocks = New-Object System.Collections.ArrayList
+    $script:SectionHeaders = New-Object System.Collections.ArrayList
     foreach ($grp in $order) {
         $members = @($shown | Where-Object { $_.status -eq $grp.key })
         if ($members.Count -eq 0) { continue }
@@ -1076,6 +1136,7 @@ function Render-List($recs) {
         $hp.Tag = $grp.key; $hl.Tag = $grp.key
         $hp.Add_Click($script:onSectionClick); $hl.Add_Click($script:onSectionClick)
         [void]$blocks.Add($hp)
+        [void]$script:SectionHeaders.Add(@{ ctl = $hp; key = $grp.key; label = $hl.Text })
         if ($collapsed) { continue }
 
         $sorted = @($members | Sort-Object @{ Expression = { Id-Key $_.id } }, @{ Expression = { $_.project } }, @{ Expression = { $_.id } })
@@ -1089,7 +1150,7 @@ function Render-List($recs) {
                                # label's right-anchor margin is computed correctly
 
             [void](New-RowLabel $row ('#'+$r.id) 10 30 $cDim $fIdEn 'MiddleLeft')
-            [void](New-RowLabel $row $G.dot      42 14 (StatusColor $r.status) $fDot 'MiddleCenter')
+            [void](New-RowLabel $row $G.dot 42 14 (StatusColor $r.status) $fDot 'MiddleCenter')
             for ($ci = 0; $ci -lt $N; $ci++) {
                 $cv = RowColVal $r $ci
                 $cx = $colX0 + $ci * $colStep
@@ -1115,6 +1176,7 @@ function Render-List($recs) {
     for ($i = $blocks.Count - 1; $i -ge 0; $i--) { $content.Controls.Add($blocks[$i]) }
     $content.ResumeLayout()
     try { $content.AutoScrollPosition = New-Object System.Drawing.Point((-$prevScroll.X), (-$prevScroll.Y)) } catch { }
+    Update-Sticky
 }
 
 function Show-Empty($msg) {
@@ -1427,6 +1489,7 @@ function Set-Rolled($rolled) {
     }
     $btnRoll.Text = $(if ($script:Rolled) { $G.triDown } else { $G.rollUp })
     $tip.SetToolTip($btnRoll, $(if ($script:Rolled) { 'Expand' } else { 'Collapse to title bar' }))
+    Update-Sticky
     Save-Config
 }
 function Toggle-Roll { Set-Rolled (-not $script:Rolled) }
@@ -1440,6 +1503,54 @@ function Set-WrapAll($on) {
     Update-Now -force
 }
 function Toggle-WrapAll { Set-WrapAll (-not $script:WrapAll) }
+
+# Re-pin the panel above other topmost windows. Skipped while a dialog is open so
+# it never jumps on top of (and hides) a modal like Manage statuses / Edit task.
+function Assert-Topmost {
+    try {
+        if ($script:autoHidden) { return }
+        if ([System.Windows.Forms.Application]::OpenForms.Count -gt 1) { return }
+        if ($form.IsHandleCreated) { [Native]::PinTop($form.Handle) }
+    } catch { }
+}
+
+# Hide the panel while a screen-capture tool is in the foreground, so it never
+# blocks what you're trying to capture; restore it when capture ends.
+function Check-ScreenCapture {
+    try {
+        $pn = ''
+        try { $pn = (Get-Process -Id ([Native]::ForegroundPid()) -ErrorAction Stop).ProcessName.ToLower() } catch { }
+        $isSnip = ($pn -and ($script:snipProcs -contains $pn))
+        if ($isSnip -and -not $script:autoHidden) {
+            $script:autoHidden = $true
+            $form.Visible = $false
+        } elseif (-not $isSnip -and $script:autoHidden) {
+            $script:autoHidden = $false
+            if (-not $script:Rolled) { Show-Panel } else { $form.Visible = $true; [Native]::ShowTop($form.Handle) }
+        }
+    } catch { }
+}
+
+# Bring the panel back: make it visible, on-screen, and topmost (used by the tray
+# icon so a lost/covered panel can always be recalled).
+function Show-Panel {
+    try {
+        $form.Visible = $true
+        if ($form.WindowState -ne 'Normal') { $form.WindowState = 'Normal' }
+        $r = New-Object System.Drawing.Rectangle($form.Location.X, $form.Location.Y, $form.Width, $form.Height)
+        $onScreen = $false
+        foreach ($sc in [System.Windows.Forms.Screen]::AllScreens) {
+            $i = [System.Drawing.Rectangle]::Intersect($sc.WorkingArea, $r)
+            if ($i.Width -ge 80 -and $i.Height -ge 40) { $onScreen = $true; break }
+        }
+        if (-not $onScreen) {
+            $wa = [System.Windows.Forms.Screen]::PrimaryScreen.WorkingArea
+            $form.Location = New-Object System.Drawing.Point(($wa.Width - $form.Width - 14), 44)
+            $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y; Save-Config
+        }
+        [Native]::ShowTop($form.Handle)
+    } catch { }
+}
 
 # ------------------------------------------------------- update check -------
 function Open-Repo { try { Start-Process $RepoUrl } catch { } }
@@ -1947,11 +2058,51 @@ $form.Add_MouseUp({
 })
 $form.Add_MouseLeave({ if (-not $script:edgeRsz) { $form.Cursor = 'Default' } })
 
+# ---- system tray icon (always-available way to recall the panel) ----
+$script:tray = New-Object System.Windows.Forms.NotifyIcon
+$script:tray.Text = 'Tasks Tracker'
+try {
+    $bmp = New-Object System.Drawing.Bitmap 32, 32
+    $gfx = [System.Drawing.Graphics]::FromImage($bmp); $gfx.SmoothingMode = 'AntiAlias'
+    $gfx.Clear([System.Drawing.Color]::Transparent)
+    $bl = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(59,130,246))
+    $dk = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(17,17,19))
+    $gfx.FillEllipse($bl, 3, 3, 26, 26)     # blue disc
+    $gfx.FillEllipse($dk, 9, 9, 14, 14)     # dark hole -> ring
+    $gfx.FillEllipse($bl, 13, 13, 6, 6)     # center dot (the ◉ look)
+    $gfx.Dispose()
+    $script:tray.Icon = [System.Drawing.Icon]::FromHandle($bmp.GetHicon())
+} catch { try { $script:tray.Icon = [System.Drawing.SystemIcons]::Application } catch { } }
+
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayMenu.BackColor = $cBar; $trayMenu.ForeColor = $cText; $trayMenu.ShowImageMargin = $false
+$tmShow = New-Object System.Windows.Forms.ToolStripMenuItem('Show / bring to front'); $tmShow.ForeColor = $cText
+$tmShow.Add_Click({ Show-Panel })
+[void]$trayMenu.Items.Add($tmShow)
+$tmRoll = New-Object System.Windows.Forms.ToolStripMenuItem('Collapse / expand'); $tmRoll.ForeColor = $cText
+$tmRoll.Add_Click({ Show-Panel; Toggle-Roll })
+[void]$trayMenu.Items.Add($tmRoll)
+[void]$trayMenu.Items.Add((New-Object System.Windows.Forms.ToolStripSeparator))
+$tmQuit = New-Object System.Windows.Forms.ToolStripMenuItem('Close panel'); $tmQuit.ForeColor = $cText
+$tmQuit.Add_Click({ $form.Close() })
+[void]$trayMenu.Items.Add($tmQuit)
+$script:tray.ContextMenuStrip = $trayMenu
+$script:tray.Add_MouseClick({ param($s,$e) if ($e.Button -eq [System.Windows.Forms.MouseButtons]::Left) { Show-Panel } })
+$script:tray.Add_DoubleClick({ Show-Panel })
+$script:tray.Visible = $true
+
 # ------------------------------------------------------------- timer --------
 $timer = New-Object System.Windows.Forms.Timer
 $timer.Interval = 2000
-$timer.Add_Tick({ Update-Now; Poll-UpdateCheck })
+$timer.Add_Tick({ Update-Now; Poll-UpdateCheck; Assert-Topmost })
 $timer.Start()
+
+# Fast poll just for screen-capture detection (low latency so the panel gets out
+# of the way before you finish selecting a region).
+$capTimer = New-Object System.Windows.Forms.Timer
+$capTimer.Interval = 400
+$capTimer.Add_Tick({ Check-ScreenCapture })
+$capTimer.Start()
 
 # Single instance: when a new copy launches, close any previous one so only the
 # newest window stays. We record our PID next to the script; a new instance reads
@@ -1994,7 +2145,8 @@ $form.Add_FormClosing({
     $script:PosX = $form.Location.X; $script:PosY = $form.Location.Y
     $script:PosW = $form.Width
     if (-not $script:Rolled) { $script:PosH = $form.Height }   # keep the expanded height
-    Save-Config; $timer.Stop()
+    Save-Config; $timer.Stop(); try { $capTimer.Stop() } catch { }
+    try { if ($script:tray) { $script:tray.Visible = $false; $script:tray.Dispose() } } catch { }
     # Remove our PID stamp only if it's still ours (a newer instance may own it now).
     try { if ((Test-Path $PidFile) -and ((([string](Get-Content $PidFile -Raw)).Trim()) -eq [string]$PID)) { Remove-Item $PidFile -Force } } catch { }
 })

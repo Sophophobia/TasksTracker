@@ -26,6 +26,8 @@ corner to see what's in progress / pending / done across all your projects.
 - **Multiple files / projects** are merged into the same status groups; each row's
   tag columns tell you which project / area it belongs to.
 - **Done** is collapsed by default. **Click a section header** to collapse/expand it.
+- The current section's header **stays pinned at the top** while you scroll, so you
+  always know which status group you're looking at.
 - Long titles are ellipsized; **click a row** to expand the full title (click again
   to collapse). Hovering also shows the full title as a tooltip.
 - The top bar shows the last refresh time. Chinese renders in Microsoft YaHei UI,
@@ -110,7 +112,17 @@ to open it). Checks run in the background and silently no-op when offline.
 
 The window is a tool-window: always on top, hidden from the taskbar / Alt-Tab,
 and set to **not steal focus** — clicking it won't pull keyboard focus out of
-whatever you're typing in.
+whatever you're typing in. It re-pins itself above other always-on-top windows
+every couple of seconds (paused while a dialog is open), and **auto-hides while a
+screen-capture tool** (Snipping Tool, ShareX, Greenshot, …) is in the foreground
+so it never blocks what you're capturing — it reappears when you're done.
+
+## System tray
+
+The panel adds a **tray icon** (the ◉ ring). If the panel ever gets covered or
+you lose track of it, **click the tray icon** to bring it back to the front and
+on-screen. **Right-click** the icon for *Show / bring to front*,
+*Collapse / expand*, and *Close panel*.
 
 ## How it works
 
@@ -184,6 +196,7 @@ MIT — see [`LICENSE`](LICENSE).
   选项就是该层级出现过的值。
 - **多文件 / 多项目**会合并进同一组状态里;每行的标签列告诉你它属于哪个项目 / 区域。
 - **完成**默认折叠。**点击段标题**即可折叠/展开。
+- 滚动时,当前所在分组的标题会**吸顶固定**,让你随时知道在看哪个状态分组。
 - 标题过长会省略;**点击该行**展开完整标题(再点收起),悬停也有完整提示。
 - 顶栏显示最后刷新时间。中文用微软雅黑、英文用 Segoe UI 渲染。
 
@@ -254,7 +267,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -Sta -WindowStyle Hidden -File "ta
 检查在后台进行,离线时静默跳过。
 
 这是个工具窗口:始终置顶、不出现在任务栏/Alt-Tab、且**不抢焦点** —— 点它不会把你
-正在打字的输入焦点抢走。
+正在打字的输入焦点抢走。它每隔约两秒会把自己重新置顶到其它置顶窗口之上(有对话框打开时暂停);
+并且在**截图工具**(Snipping Tool、ShareX、Greenshot…)处于前台时**自动隐藏**,不挡你要截的内容,
+截完会自动再出现。
+
+## 系统托盘
+
+面板会在托盘区放一个**图标**(◉ 圆环)。万一面板被盖住或找不到了,**点托盘图标**就能把它
+拉回最前、并移回屏幕内。**右键**图标有 *Show / bring to front*、*Collapse / expand*、
+*Close panel*。
 
 ## 工作原理
 
